@@ -1,0 +1,14 @@
+torch
+torchvision
+# models/vision_transformer.py uses the timm 0.6 API (helpers.resolve_pretrained_cfg returning a dict).
+timm==0.6.13
+scikit-learn
+pyyaml
+numpy
+easydict
+ftfy
+regex
+matplotlib
+# tests only
+scipy
+pytest

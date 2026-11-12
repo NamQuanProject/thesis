@@ -1,0 +1,37 @@
+baseline/
+reports/
+
+# Local environment, datasets, pretrained weights
+.venv/
+venv/
+env/
+local_datasets/
+pretrained/
+*.npz
+
+# Run artifacts
+logs/
+results/
+outputs*/
+output*/
+*.log
+features_cache/
+
+# Python
+__pycache__/
+*.py[codz]
+*$py.class
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ipynb_checkpoints
+.mypy_cache/
+.ruff_cache/
+.env
+.envrc
+
+# OS / editors
+.DS_Store
+.vscode/
+.idea/
