@@ -1,9 +1,13 @@
 # Research candidate: coupled residual tangent experts
 
 Status, 2026-11-15: implemented and covered by small mathematical/integration
-tests; server comparison pending. This is a candidate extension of HESTIA,
-not an established novel algorithm or an ICML-ready paper. Its purpose is to
-test a concrete optimization defect before making a contribution claim.
+tests; the inspected server comparison is negative. At matched 15-task
+checkpoints, the fork reference reached 64.4833% and this coupled configuration
+38.5186%. The coupled run did not finish all 20 tasks. See the
+[run record](run_records/2026-11-15.md); the joint solve, sketch, and target changes
+have not been isolated. This is not an established improvement or an ICML-ready
+paper. The [subsequent research review](acquisition_research_2025plus.md) studies
+acquisition and retention under limited historical information.
 
 Working paper question: **When do independently fitted adapter updates interfere,
 and can a bounded-memory joint residual fit improve task-free continual learning?**

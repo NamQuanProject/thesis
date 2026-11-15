@@ -1,5 +1,11 @@
 # Grow What You Can Retrieve
 
+**Scope update, 16 November 2026:** the subsequent request prioritizes capability
+acquisition, retention constraints, and bases, with a 2025-onward literature
+filter. See [the acquisition and memory review](acquisition_research_2025plus.md)
+for the current recommendation and recent baselines outside HESTIA. The routing
+proposal below remains a research record, not an implemented growth controller.
+
 ## Research decision, 15 November 2026
 
 **Proposed direction:** distinguish routing failure from missing predictive capacity,
