@@ -169,6 +169,11 @@ root.improve.accumulate = 'merge'       # g += A^T A w_b (released code) | 'join
 root.improve.tangent_solver = 'block'   # original | coupled_sketch: research candidate
 root.improve.tangent_sketch_rank = 128
 root.improve.tangent_residual_target = True  # used only by coupled_sketch
+root.improve.prediction = 'hard'       # hard: reference; mass: support-local specialist research
+root.improve.mass_inference = 'full'   # full | certified | budget | anchor | soft_mixture
+root.improve.mass_alpha = 0.8          # maximum outgoing probability fraction per class
+root.improve.mass_max_experts = 2      # per-image cap, only used by budget inference
+root.improve.anchor_temperature = 1.0 # predeclared; never fitted on test labels
 
 root.runtime = edict()
 root.runtime.jacobian_mode = 'batch'   # reference batch Jacobian | sample-independent per_sample
@@ -179,6 +184,7 @@ root.runtime.save_ridge_stats = False # evaluation needs solved adapters, not la
 root.runtime.max_train_batches = 0    # per task; nonzero means diagnostic, never a benchmark result
 root.runtime.max_eval_batches = 0     # per task
 root.runtime.max_tasks = 0            # prefix of the unchanged stream, for a diagnostic pilot only
+root.runtime.mixed_eval = False       # shuffle all observed validation sources before batching
 
 _DEFAULTS = copy.deepcopy(root)
 
@@ -201,6 +207,8 @@ def validate_config():
         'class_prior': ('empirical', 'uniform'), 'select_metric': ('acc', 'loss'),
         'accumulate': ('merge', 'joint'), 'device': ('auto', 'cpu', 'cuda', 'mps'),
         'tangent_solver': ('block', 'coupled_sketch'),
+        'prediction': ('hard', 'mass'),
+        'mass_inference': ('full', 'certified', 'budget', 'anchor', 'soft_mixture'),
     }
     for key, allowed in choices.items():
         if root.improve[key] not in allowed:
@@ -229,6 +237,16 @@ def validate_config():
     if root.improve.cov_shrink > 1:
         raise ValueError('improve.cov_shrink must be in [0, 1]')
     imp = root.improve
+    if not math.isfinite(imp.mass_alpha) or not 0 <= imp.mass_alpha < 1:
+        raise ValueError('improve.mass_alpha must be in [0, 1)')
+    if not math.isfinite(imp.anchor_temperature) or imp.anchor_temperature <= 0:
+        raise ValueError('improve.anchor_temperature must be positive')
+    if type(imp.mass_max_experts) is not int or imp.mass_max_experts < 0:
+        raise ValueError('improve.mass_max_experts must be a nonnegative integer')
+    if imp.prediction == 'mass' and (imp.routing_unit != 'sample' or imp.fusion_alpha):
+        raise ValueError('mass prediction requires routing_unit=sample and fusion_alpha=0')
+    if root.runtime.mixed_eval and imp.prediction != 'mass':
+        raise ValueError('mixed_eval is currently implemented for mass prediction only')
     if imp.fusion_alpha and (imp.routing_key != 'class_gauss' or imp.routing_space != 'pretrained'):
         raise ValueError('fusion requires class_gauss keys in pretrained space')
     if imp.routing_key == 'class_gauss' and imp.routing_space == 'adapter' and imp.cov_scope == 'shared':

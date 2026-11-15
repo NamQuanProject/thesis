@@ -25,6 +25,7 @@ VARIANTS = {
     'coupled_raw': ['improve.tangent_solver=coupled_sketch', 'improve.tangent_residual_target=false'],
     'coupled_gauss': ['improve.tangent_solver=coupled_sketch', 'improve.routing_key=class_gauss',
                       'improve.routing_space=pretrained', 'improve.key_view=clean'],
+    'mass': ['improve.prediction=mass', 'improve.routing_unit=sample'],
 }
 
 
@@ -137,7 +138,8 @@ def main():
             result = json.loads((output / 'result.json').read_text())
             repeated = json.loads((output / 'reevaluation.json').read_text())
             for key in ('avg_acc', 'forgetting', 'routing_batch', 'routing_sample'):
-                if abs(result[key] - repeated[key]) > 1e-5:
+                if ((result[key] is None or repeated[key] is None) and result[key] != repeated[key]) or (
+                        result[key] is not None and repeated[key] is not None and abs(result[key] - repeated[key]) > 1e-5):
                     raise RuntimeError(f'Re-evaluation disagrees on {key}: {output}')
     except BaseException as exc:
         if process is not None:

@@ -342,7 +342,8 @@ def build_continual_dataloader(batch_size=1, preprocess=None):
     class_mask = list()
     transform_train = preprocess if preprocess is not None else build_transform(True)
     transform_val = preprocess if preprocess is not None else build_transform(False)
-    if preprocess is None and cfg.improve.routing_key == 'class_gauss' and cfg.improve.key_view == 'clean':
+    if preprocess is None and (cfg.improve.prediction == 'mass' or
+                               (cfg.improve.routing_key == 'class_gauss' and cfg.improve.key_view == 'clean')):
         transform_train = TwoViewTransform(build_transform(True), build_transform(False))
 
     if cfg.run_label in ['CIFAR-10', 'CIFAR-100', 'IMAGENET-R', 'TINY-IMAGENET', 'VTAB5T']:

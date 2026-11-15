@@ -17,6 +17,7 @@ from lib.ia3 import is_ia3_param, collect_ia3_params, apply_ia3_updates, reset_i
 from lib.checkpointing import save_task_checkpoint, atomic_torch_save
 from lib.experiment import begin_run, finish_run, write_json, preserve_rng_state, loader_manifest
 from lib.task_keys import build_key_bank
+from lib.mass_specialists import GaussianAnchor
 from data.dataset import *
 from utils.vision import *
 from lib.jacobians import build_ia3_jacobian
@@ -66,12 +67,17 @@ def log_gmm_summary(online_gauss, prefix=""):
             f"var_mean={online_gauss.vars[k].mean().item():.4f}")
     log("==================================\n")
 
-def snapshot_adapter(global_updates, online_gauss):
+def snapshot_adapter(global_updates, online_gauss, model=None):
     """Freeze the IA3 solution and GMM task key of a distribution (in memory)."""
-    return {
+    state = {
         'ia3': {k: v.detach().clone() for k, v in global_updates.items()},
         'gmm': (online_gauss.means.clone(), online_gauss.vars.clone(), online_gauss.counts.clone()),
     }
+    if model is not None:
+        # An expert is an adapter AND its head; later head updates must not alter it.
+        state['head_weight'] = model.head.weight.detach().cpu().clone()
+        state['head_bias'] = model.head.bias.detach().cpu().clone()
+    return state
 
 def learn_continually():
     log('\nRunning experiments using TANGENT FINETUNING')
@@ -145,6 +151,9 @@ def learn_continually():
     within_seen_classes = set()
     adapter_bank = []                    # finalized distributions: {'ia3', 'gmm'}
     key_bank = build_key_bank(cfg, feature_dim=vit_model.num_features)
+    anchor = (GaussianAnchor(vit_model.num_features, cfg.dtask.nb_classes, imp.anchor_temperature)
+              if imp.prediction == 'mass' else None)
+    frozen_head = vit_model if anchor is not None else None
     acc_matrix = np.zeros((cfg.continual.n_tasks, cfg.continual.n_tasks))
 
     criterion = torch.nn.CrossEntropyLoss().to(cfg.device)
@@ -215,7 +224,7 @@ def learn_continually():
                     save_task_checkpoint(cfg.dtask.output_dir, count_save, global_At_A, global_AtA_w,
                                           online_gauss, global_updates=previous_global_update,
                                           route_gauss=route_gauss, save_ridge_stats=cfg.runtime.save_ridge_stats)
-                    adapter_bank.append(snapshot_adapter(previous_global_update, route_gauss or online_gauss))
+                    adapter_bank.append(snapshot_adapter(previous_global_update, route_gauss or online_gauss, frozen_head))
                     task_class_mask[count_save] = list(within_seen_classes)
 
                     # Reset everything for the next distribution.
@@ -290,10 +299,16 @@ def learn_continually():
                     route_gauss.update(pre_features, batch_idx)
 
             # Order-invariant class-conditional task key (additive statistics).
+            clean_pre_features = None
+            if anchor is not None:
+                with torch.no_grad():
+                    clean_pre_features = backbone(input_key if input_key is not None else input)['pre_logits']
+                anchor.update(clean_pre_features, target)
             if key_bank is not None:
                 with torch.no_grad():
                     if imp.routing_space == 'pretrained':
-                        key_features = backbone(input_key if input_key is not None else input)['pre_logits']
+                        key_features = (clean_pre_features if clean_pre_features is not None else
+                                        backbone(input_key if input_key is not None else input)['pre_logits'])
                     elif input_key is not None:
                         key_features = vit_model(input_key)['pre_logits']
                     else:
@@ -312,16 +327,17 @@ def learn_continually():
             eval_model = copy.deepcopy(backbone).eval()
             eval_model.head.weight.copy_(vit_model.head.weight)
             eval_model.head.bias.copy_(vit_model.head.bias)
-            adapters = adapter_bank + [snapshot_adapter(previous_global_update, route_gauss or online_gauss)]
+            adapters = adapter_bank + [snapshot_adapter(previous_global_update, route_gauss or online_gauss, frozen_head)]
             if key_bank is not None:
                 log(f"Class-Gaussian keys: {key_bank.describe()}")
             task_test_stats = evaluate_bank(eval_model, adapters, key_bank, data_loader, temp_class_mask,
-                                            step, acc_matrix, cfg, seen_task_ids=seen_tasks)
+                                            step, acc_matrix, cfg, seen_task_ids=seen_tasks, anchor=anchor)
             atomic_torch_save(torch.from_numpy(acc_matrix), os.path.join(cfg.dtask.output_dir, 'global_acc_matrix.pth'))
             # One coherent bundle is published after each completed evaluation.
             # It supports portable re-evaluation, not training resume.
             atomic_torch_save({
-                'version': 1, 'adapters': adapters,
+                'version': 2 if anchor is not None else 1, 'adapters': adapters,
+                'anchor': None if anchor is None else anchor.state_dict(),
                 'key_bank': None if key_bank is None else key_bank.state_dict(),
                 'head_weight': vit_model.head.weight, 'head_bias': vit_model.head.bias,
                 'class_mask': temp_class_mask, 'seen_tasks': list(seen_tasks),
@@ -345,17 +361,20 @@ def learn_continually():
     if key_bank is not None:
         atomic_torch_save(key_bank.state_dict(), os.path.join(cfg.dtask.output_dir, 'key_bank.pth'))
     log(f"FINAL | avg acc {task_test_stats['avg_acc']:.4f} | forgetting {task_test_stats['forgetting']:.4f} | "
-        f"routing (batch) {task_test_stats['routing_batch']:.4f} | routing (sample) {task_test_stats['routing_sample']:.4f} | "
+        f"routing (batch) {task_test_stats['routing_batch']} | routing (sample) {task_test_stats['routing_sample']} | "
         f"detected distributions {count_save + 1}")
     result = {'cfg': cfg.get('cfg_name', ''), 'tag': cfg.get('run_tag', ''), 'seed': cfg.seed,
               'avg_acc': float(task_test_stats['avg_acc']), 'forgetting': float(task_test_stats['forgetting']),
-              'routing_batch': float(task_test_stats['routing_batch']),
-              'routing_sample': float(task_test_stats['routing_sample']),
+              'routing_batch': task_test_stats['routing_batch'],
+              'routing_sample': task_test_stats['routing_sample'],
               'detected_distributions': count_save + 1, 'improve': dict(cfg.improve),
               'protocol_version': 2, 'routing_metric': 'selected_adapter_label_coverage',
               'kind': 'diagnostic' if (cfg.runtime.max_train_batches or cfg.runtime.max_eval_batches or cfg.runtime.max_tasks) else 'benchmark',
               'elapsed_seconds': time.monotonic() - started, 'training_samples': training_samples,
               'peak_cuda_memory_bytes': torch.cuda.max_memory_allocated(cfg.device) if cfg.device.type == 'cuda' else None}
+    if anchor is not None:
+        result.update({k: v for k, v in task_test_stats.items() if k != 'acc_matrix'})
+        result.update(protocol_version=3, routing_metric=None)
     write_json(os.path.join(cfg.dtask.output_dir, 'result.json'), result)
     return task_test_stats
 

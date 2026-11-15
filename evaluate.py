@@ -17,6 +17,8 @@ from lib.ia3 import apply_ia3_updates, reset_ia3_to_identity
 from lib.checkpointing import task_checkpoint_dir, load_tensor_state
 from lib.experiment import loader_manifest, write_json
 from lib.task_keys import gmm_mahal_min, gmm_log_likelihood, ClassGaussianKeyBank
+from lib.mass_specialists import GaussianAnchor
+from lib.specialist_evaluation import evaluate_specialist_bank
 from data.dataset import *
 from utils.vision import *
 from timm.models import create_model
@@ -73,7 +75,7 @@ def _fuse_with_class_gauss(logits, z0, adapter_id, key_bank, alpha, device):
 
 @torch.no_grad()
 def evaluate_bank(model, adapters, key_bank, data_loader, class_mask, current_real_task, acc_matrix, cfg,
-                  seen_task_ids=None, history_available=True):
+                  seen_task_ids=None, history_available=True, anchor=None, prediction_records=None):
     """Route every test batch of the streams seen so far and classify it.
 
     `adapters[t]` holds the IA3 update (`ia3`) and GMM task key (`gmm`) of
@@ -83,6 +85,9 @@ def evaluate_bank(model, adapters, key_bank, data_loader, class_mask, current_re
     instead of deep-copying one ViT per adapter.
     """
     imp = cfg.improve
+    if imp.prediction == 'mass':
+        return evaluate_specialist_bank(model, adapters, anchor, data_loader, class_mask,
+                                         current_real_task, acc_matrix, cfg, seen_task_ids, history_available, prediction_records)
     model.eval()
     device = cfg.device
     T = len(adapters)
@@ -197,7 +202,7 @@ def evaluate_bank(model, adapters, key_bank, data_loader, class_mask, current_re
             'routing_batch': route_batch, 'routing_sample': route_sample}
 
 
-def run_evaluation():
+def run_evaluation(history_available=True, prediction_records=None):
     """Re-evaluate a finished run from its checkpoints (all streams, final head)."""
     log('\nRunning evaluation using TANGENT FINETUNING')
     set_seed(cfg.seed)
@@ -205,7 +210,7 @@ def run_evaluation():
     bundle_path = Path(cfg.dtask.output_dir) / 'evaluation_checkpoint.pth'
     if bundle_path.exists():
         bundle = load_tensor_state(bundle_path)
-        if bundle['version'] != 1:
+        if bundle['version'] not in (1, 2):
             raise ValueError('Unsupported evaluation checkpoint version')
         stream = loader_manifest(data_loader, source_masks, bundle['stream']['task_order'])
         if stream != bundle['stream']:
@@ -216,9 +221,11 @@ def run_evaluation():
             model.head.weight.copy_(bundle['head_weight'])
             model.head.bias.copy_(bundle['head_bias'])
         keys = None if bundle['key_bank'] is None else ClassGaussianKeyBank.from_state_dict(bundle['key_bank'])
+        anchor = None if bundle.get('anchor') is None else GaussianAnchor.from_state_dict(bundle['anchor'])
         return evaluate_bank(model, bundle['adapters'], keys, data_loader, bundle['class_mask'],
                              len(bundle['seen_tasks']) - 1, bundle['acc_matrix'].numpy().copy(), cfg,
-                             seen_task_ids=bundle['seen_tasks'])
+                             seen_task_ids=bundle['seen_tasks'], history_available=history_available, anchor=anchor,
+                             prediction_records=prediction_records)
 
     class_mask = load_tensor_state(os.path.join(cfg.dtask.output_dir, 'class_mask.pth'))
     log('class_mask %s ' % class_mask)
@@ -280,7 +287,7 @@ def main():
     set_seed(cfg.seed)
 
     if cfg.continual.method.run_merlin:
-        result = run_evaluation()
+        result = run_evaluation(history_available=not bool(args.set))
         write_json(Path(cfg.dtask.output_dir) / 'reevaluation.json',
                    {k: v for k, v in result.items() if k != 'acc_matrix'})
 

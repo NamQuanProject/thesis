@@ -84,7 +84,7 @@ def test_gmm_can_start_on_short_boundary_batch():
 
 
 @pytest.mark.parametrize('variant', ['base', 'class_gauss', 'class_gauss_sample', 'gmm_pretrained', 'shuffled',
-                                   'coupled', 'coupled_raw', 'coupled_gauss'])
+                                   'coupled', 'coupled_raw', 'coupled_gauss', 'mass', 'mass_certified'])
 def test_tiny_pipeline_and_checkpoint_reproduce(tmp_path, monkeypatch, variant):
     import main as training
     import evaluate
@@ -116,6 +116,10 @@ def test_tiny_pipeline_and_checkpoint_reproduce(tmp_path, monkeypatch, variant):
         cfg.improve.gmm_score = 'nll'
     if variant == 'shuffled':
         cfg.continual.shuffle_task = True
+    if variant.startswith('mass'):
+        cfg_from_list(['improve.prediction=mass', 'improve.routing_unit=sample'])
+        if variant == 'mass_certified':
+            cfg.improve.mass_inference = 'certified'
     if variant.startswith('coupled'):
         cfg_from_list(['improve.tangent_solver=coupled_sketch', 'improve.tangent_sketch_rank=8',
                        'runtime.jacobian_mode=per_sample', 'runtime.jacobian_chunk_size=0',
@@ -137,7 +141,26 @@ def test_tiny_pipeline_and_checkpoint_reproduce(tmp_path, monkeypatch, variant):
     assert not list((tmp_path / variant).rglob('global_At_A.pth'))
     repeated = evaluate.run_evaluation()
     for metric in ('avg_acc', 'forgetting', 'routing_batch', 'routing_sample'):
-        assert repeated[metric] == pytest.approx(final[metric], abs=1e-6)
+        assert repeated[metric] == (None if final[metric] is None else pytest.approx(final[metric], abs=1e-6))
+    if variant.startswith('mass'):
+        assert bundle['version'] == 2 and all('head_weight' in a for a in bundle['adapters'])
+        assert np.isfinite(final['nll'])
+        for metric in ('nll', 'brier', 'mean_expert_evaluations', 'certified_fraction'):
+            assert repeated[metric] == pytest.approx(final[metric], abs=1e-6)
+        cfg.runtime.mixed_eval = True
+        mixed = evaluate.run_evaluation(history_available=False)
+        assert mixed['forgetting'] is None
+        for metric in ('avg_acc', 'anchor_avg_acc', 'nll', 'brier', 'mean_expert_evaluations'):
+            assert mixed[metric] == pytest.approx(final[metric], abs=1e-6)
+        if variant == 'mass':
+            import sys
+            from scripts.evaluate_specialists import main as ablation
+            monkeypatch.setattr(sys, 'argv', ['evaluate_specialists.py', '--run-dir', str(tmp_path / variant),
+                                             '--output-dir', str(tmp_path / 'ablations'), '--device', 'cpu'])
+            ablation()
+            summary = json.loads((tmp_path / 'ablations/summary.json').read_text())
+            assert len(summary['results']) == 10
+            assert all(value == 0 for value in summary['checks'].values())
 
 
 def test_launcher_prints_without_training(tmp_path):

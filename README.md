@@ -57,7 +57,21 @@ controls. The payback-audit research manuscript described in the earlier convers
 is not implemented in this checkout. These runs evaluate the existing HESTIA and
 Gaussian-routing code, not that proposed controller.
 
-The new [coupled residual tangent candidate](docs/coupled_research.md) changes
+The current [support-local specialist research](docs/support_specialists.md)
+tests a stronger inference question: can overlapping experts improve a global
+classifier without hard task exclusion, and can inference stop with a certificate
+that top-1 matches the full bank? `--variants mass` trains the opt-in path with
+frozen expert heads and global training-feature statistics. The research note
+contains proofs, close prior work, limitations and the ImageNet-R ablation plan.
+No accuracy improvement or ICML-level novelty has been established.
+
+```bash
+python scripts/run_imagenet_r.py --stage pilot --variants mass --execute
+python scripts/evaluate_specialists.py --run-dir PATH_TO_COMPLETED_MASS_RUN \
+  --output-dir results/mass-inference-ablation
+```
+
+The separate [coupled residual tangent candidate](docs/coupled_research.md) changes
 adaptation itself: it fits interacting IA3 blocks jointly against a residual
 target and consolidates derivative summaries with a bounded sketch. Its novelty
 and performance are research questions. The document includes the mathematical
