@@ -48,7 +48,7 @@ def write_json(path, value):
 
 
 def source_identity():
-    files = [*ROOT.glob('*.py'), ROOT / 'requirements.txt']
+    files = [*ROOT.glob('*.py'), *ROOT.glob('requirements*.txt')]
     for folder in ('lib', 'data', 'models', 'utils', 'scripts', 'configs'):
         files.extend(p for p in (ROOT / folder).rglob('*')
                      if p.suffix in ('.py', '.sh', '.yml', '.yaml', '.txt') and '__pycache__' not in p.parts)

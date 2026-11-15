@@ -36,6 +36,39 @@ pip install -r requirements.txt
 
 ## 🚀 Running Experiments
 
+The active preparation target is **ImageNet-R** (200 classes, 20 streaming
+tasks). See [the ImageNet-R runbook](docs/imagenet_r_experiments.md) for environment
+setup, explicit data/weight preparation, the diagnostic pilot, paired comparisons,
+and checkpoint re-evaluation. Training commands refuse nonempty output directories.
+
+```bash
+# After server setup and dataset preparation, print the planned commands:
+python scripts/run_imagenet_r.py --stage pilot
+# Run the small GPU pilot, including checkpoint re-evaluation:
+python scripts/run_imagenet_r.py --stage pilot --execute
+# Run the first predeclared baseline/Gaussian comparison:
+python scripts/run_imagenet_r.py --stage compare --seeds 15 --execute
+```
+
+Protocol version 2 fixes boundary class masks and evaluation bookkeeping, isolates
+training RNGs, and uses a recorded, non-destructive ImageNet-R partition. Baselines
+must be rerun under this same protocol; previous published scores are not paired
+controls. The payback-audit research manuscript described in the earlier conversation
+is not implemented in this checkout. These runs evaluate the existing HESTIA and
+Gaussian-routing code, not that proposed controller.
+
+The new [coupled residual tangent candidate](docs/coupled_research.md) changes
+adaptation itself: it fits interacting IA3 blocks jointly against a residual
+target and consolidates derivative summaries with a bounded sketch. Its novelty
+and performance are research questions. The document includes the mathematical
+scope, closest prior work, and predeclared ablations.
+
+```bash
+python scripts/run_imagenet_r.py --stage compare --seeds 15 \
+  --variants coupled coupled_raw coupled_gauss --jacobian-mode per_sample \
+  --jacobian-chunk-size 0 --efficient-runtime --output-root results/coupled-study --execute
+```
+
 To reproduce our main results, run the following commands, one for each benchmark:
 
 ```bash
@@ -58,7 +91,10 @@ Each config file specifies the dataset, streaming protocol, backbone, and HESTIA
 
 ## 🧪 Thesis improvements (this fork)
 
-All changes sit behind `cfg.improve.*` (see `lib/config.py`). **With default flags the original HESTIA algorithm runs unchanged**; the defaults only enable exact speed-ups (cached-feature head training, Woodbury ridge solves, IA3 swapping at evaluation), which are verified equal by `tests/test_improvements.py`.
+Routing and solver variants sit behind `cfg.improve.*` (see `lib/config.py`).
+Defaults retain HESTIA's adaptation and routing choices, with the protocol fixes
+described above. Algebraic speedups are checked on small offline fixtures by
+`tests/test_improvements.py`; this is not proof of identical full benchmark results.
 
 | Option | Values (default first) | Purpose |
 |---|---|---|
@@ -72,6 +108,8 @@ All changes sit behind `cfg.improve.*` (see `lib/config.py`). **With default fla
 | `improve.select_metric` | `acc`, `loss` | soft-target selection criterion in the linearized update |
 | `improve.select_tol`, `improve.refine_max_iters` | `0`, `200` | minimum improvement / iteration cap of the soft-target refinement |
 | `improve.accumulate` | `merge`, `joint` | released accumulation `g += AᵀA w_b`, or paper Eq. 5 `g += Aᵀ b_b` |
+| `improve.tangent_solver` | `block`, `coupled_sketch` | released blockwise solve or the joint research candidate |
+| `improve.tangent_sketch_rank` / `tangent_residual_target` | `128` / `true` | bounded derivative summary and residual-offset ablation for the candidate |
 | `improve.device` | `auto` | cuda > mps > cpu |
 
 ```bash

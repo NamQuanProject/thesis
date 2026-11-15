@@ -21,6 +21,10 @@ VARIANTS = {
     'base_sample': ['improve.routing_unit=sample'],
     'class_gauss_sample': ['improve.routing_key=class_gauss', 'improve.routing_space=pretrained',
                            'improve.key_view=clean', 'improve.routing_unit=sample'],
+    'coupled': ['improve.tangent_solver=coupled_sketch'],
+    'coupled_raw': ['improve.tangent_solver=coupled_sketch', 'improve.tangent_residual_target=false'],
+    'coupled_gauss': ['improve.tangent_solver=coupled_sketch', 'improve.routing_key=class_gauss',
+                      'improve.routing_space=pretrained', 'improve.key_view=clean'],
 }
 
 
@@ -29,7 +33,11 @@ def commands(args):
         for variant in args.variants:
             output = args.output_root.resolve() / args.stage / variant / f'seed{seed}'
             overrides = ['improve.device=' + args.device, 'dtask.data_path=' + str(args.data_path.resolve()),
-                         'dtask.num_workers=' + str(args.workers), 'runtime.jacobian_chunk_size=1',
+                         'dtask.num_workers=' + str(args.workers),
+                         'runtime.jacobian_mode=' + args.jacobian_mode,
+                         'runtime.jacobian_chunk_size=' + str(args.jacobian_chunk_size),
+                         'runtime.efficient_head_loop=' + str(args.efficient_runtime).lower(),
+                         'runtime.empty_cache_each_batch=' + str(not args.efficient_runtime).lower(),
                          'runtime.save_ridge_stats=false', 'dtask.download=false', *VARIANTS[variant]]
             if args.stage == 'pilot':
                 overrides += ['runtime.max_tasks=2', 'runtime.max_train_batches=2',
@@ -59,11 +67,18 @@ def main():
     parser.add_argument('--output-root', type=Path, default=ROOT / 'results/imagenet-r')
     parser.add_argument('--device', choices=('cuda', 'cpu', 'mps'), default='cuda')
     parser.add_argument('--workers', type=int, default=4)
+    parser.add_argument('--jacobian-mode', choices=('batch', 'per_sample'), default='batch')
+    parser.add_argument('--jacobian-chunk-size', type=int, default=1,
+                        help='0 vectorizes the whole batch; does not change training batch size')
+    parser.add_argument('--efficient-runtime', action='store_true',
+                        help='retain allocator cache and skip discarded head metrics/barriers')
     parser.add_argument('--max-seconds', type=float, help='optional limit across all jobs; rental billing is separate')
     parser.add_argument('--execute', action='store_true')
     args = parser.parse_args()
     if args.max_seconds is not None and args.max_seconds <= 0:
         parser.error('--max-seconds must be positive')
+    if args.workers < 0 or args.jacobian_chunk_size < 0:
+        parser.error('workers and Jacobian chunk size must be nonnegative')
     if len(set(args.seeds)) != len(args.seeds) or len(set(args.variants)) != len(args.variants):
         parser.error('duplicate seeds/variants would overwrite runs')
     jobs = list(commands(args))
@@ -111,6 +126,8 @@ def main():
             with log.open('a') as handle:
                 process = subprocess.Popen([sys.executable, '-u', str(ROOT / 'evaluate.py'), '--run-dir', str(output)],
                                            cwd=ROOT, stdout=handle, stderr=subprocess.STDOUT, start_new_session=True)
+                write_json(log_dir / 'status.json', {'status': 'evaluating', 'pid': process.pid,
+                           'output_dir': str(output), 'log': str(log), 'completed': records})
                 while process.poll() is None:
                     if args.max_seconds is not None and time.monotonic() - started >= args.max_seconds:
                         raise TimeoutError('Overall experiment time limit reached during re-evaluation')

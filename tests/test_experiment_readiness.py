@@ -83,7 +83,8 @@ def test_gmm_can_start_on_short_boundary_batch():
     assert model.K == 14 and model.means.shape == (14, 4)
 
 
-@pytest.mark.parametrize('variant', ['base', 'class_gauss', 'class_gauss_sample', 'gmm_pretrained', 'shuffled'])
+@pytest.mark.parametrize('variant', ['base', 'class_gauss', 'class_gauss_sample', 'gmm_pretrained', 'shuffled',
+                                   'coupled', 'coupled_raw', 'coupled_gauss'])
 def test_tiny_pipeline_and_checkpoint_reproduce(tmp_path, monkeypatch, variant):
     import main as training
     import evaluate
@@ -115,6 +116,15 @@ def test_tiny_pipeline_and_checkpoint_reproduce(tmp_path, monkeypatch, variant):
         cfg.improve.gmm_score = 'nll'
     if variant == 'shuffled':
         cfg.continual.shuffle_task = True
+    if variant.startswith('coupled'):
+        cfg_from_list(['improve.tangent_solver=coupled_sketch', 'improve.tangent_sketch_rank=8',
+                       'runtime.jacobian_mode=per_sample', 'runtime.jacobian_chunk_size=0',
+                       'runtime.efficient_head_loop=true', 'runtime.empty_cache_each_batch=false'])
+        if variant == 'coupled_raw':
+            cfg.improve.tangent_residual_target = False
+        if variant == 'coupled_gauss':
+            cfg_from_list(['improve.routing_key=class_gauss', 'improve.routing_space=pretrained',
+                           'improve.key_view=clean'])
     cfg.dtask.output_dir = str(tmp_path / variant)
     cfg.device = torch.device('cpu')
     begin_run(cfg)

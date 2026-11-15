@@ -166,9 +166,15 @@ root.improve.select_metric = 'acc'      # soft-target refinement selection: 'acc
 root.improve.select_tol = 0.0           # minimum improvement that resets patience (original: 0)
 root.improve.refine_max_iters = 200     # cap on refinement iterations (original: 200)
 root.improve.accumulate = 'merge'       # g += A^T A w_b (released code) | 'joint': g += A^T b_b (paper Eq. 5)
+root.improve.tangent_solver = 'block'   # original | coupled_sketch: research candidate
+root.improve.tangent_sketch_rank = 128
+root.improve.tangent_residual_target = True  # used only by coupled_sketch
 
 root.runtime = edict()
+root.runtime.jacobian_mode = 'batch'   # reference batch Jacobian | sample-independent per_sample
 root.runtime.jacobian_chunk_size = 1   # exact Jacobian rows; lower peak memory than full vectorization
+root.runtime.efficient_head_loop = False  # avoid redundant per-epoch metrics and synchronizations
+root.runtime.empty_cache_each_batch = True  # reference behavior; false retains the CUDA allocator cache
 root.runtime.save_ridge_stats = False # evaluation needs solved adapters, not large Gram matrices
 root.runtime.max_train_batches = 0    # per task; nonzero means diagnostic, never a benchmark result
 root.runtime.max_eval_batches = 0     # per task
@@ -185,6 +191,8 @@ def reset_config():
 
 def validate_config():
     """Fail before model construction for unsupported or inconsistent experiments."""
+    if root.runtime.jacobian_mode not in ('batch', 'per_sample'):
+        raise ValueError('runtime.jacobian_mode must be batch or per_sample')
     choices = {
         'routing_key': ('gmm', 'class_gauss'), 'routing_space': ('adapter', 'pretrained'),
         'routing_unit': ('batch', 'sample'), 'gmm_score': ('mahal_min', 'nll'),
@@ -192,6 +200,7 @@ def validate_config():
         'cov_scope': ('shared', 'task'), 'cov_shrink_mode': ('oas', 'fixed'),
         'class_prior': ('empirical', 'uniform'), 'select_metric': ('acc', 'loss'),
         'accumulate': ('merge', 'joint'), 'device': ('auto', 'cpu', 'cuda', 'mps'),
+        'tangent_solver': ('block', 'coupled_sketch'),
     }
     for key, allowed in choices.items():
         if root.improve[key] not in allowed:
@@ -202,6 +211,7 @@ def validate_config():
         ('signature.n_clusters', root.signature.n_clusters),
         ('signature.window_t', root.signature.window_t),
         ('improve.refine_max_iters', root.improve.refine_max_iters),
+        ('improve.tangent_sketch_rank', root.improve.tangent_sketch_rank),
     ):
         if type(value) is not int or value < 1:
             raise ValueError(f'{name} must be a positive integer')
@@ -227,6 +237,8 @@ def validate_config():
         raise ValueError('cached head training requires zero drop/drop_path; set improve.fast_head=false')
     if not imp.inmemory_bank:
         raise ValueError('only improve.inmemory_bank=true is implemented')
+    if imp.tangent_solver == 'coupled_sketch' and root.runtime.save_ridge_stats:
+        raise ValueError('coupled_sketch stores solved adapters; save_ridge_stats must be false')
     if root.dtask.task_inc:
         raise ValueError('this experiment runner supports global class labels, not task_inc=true')
     if not root.continual.method.run_merlin:

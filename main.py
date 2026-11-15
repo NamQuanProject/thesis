@@ -19,7 +19,8 @@ from lib.experiment import begin_run, finish_run, write_json, preserve_rng_state
 from lib.task_keys import build_key_bank
 from data.dataset import *
 from utils.vision import *
-from torch.func import jacrev, functional_call
+from lib.jacobians import build_ia3_jacobian
+from lib.coupled_tangent import CoupledTangentState
 from lib.train import tangent_tuning_a_batch, train_one_batch
 from lib.signatures import OnlineDiagonalGMM, detect_convergence_stationary_streaming
 from evaluate import evaluate_bank, _build_vit_model
@@ -124,16 +125,14 @@ def learn_continually():
     log(f"IA3 trainable params: {ia3_params}")
     log(f"Total trainable params (IA3 + head): {head_params + ia3_params}")
 
-    def wrapped_g(params, X, target):
-        """Wraps `net_g` so that `torch.func.jacrev` can differentiate w.r.t. `params`."""
-        return functional_call(net_g, params, (X, target))
+    jacobian_fn = build_ia3_jacobian(net_g, cfg.runtime.jacobian_mode, cfg.runtime.jacobian_chunk_size)
 
-    jacobian_fn = jacrev(wrapped_g, argnums=0, chunk_size=cfg.runtime.jacobian_chunk_size or None)
-
-    global_At_A = {layer: torch.zeros((p.size(-1), p.size(-1)), device=cfg.device)
-                   for layer, p in tuning_params.items()}
-    global_AtA_w = {layer: torch.zeros(p.size(-1), device=cfg.device)
-                     for layer, p in tuning_params.items()}
+    coupled_state = (CoupledTangentState(tuning_params, imp.tangent_sketch_rank, cfg.seed + 730201)
+                     if imp.tangent_solver == 'coupled_sketch' else None)
+    global_At_A = {} if coupled_state is not None else {
+        layer: torch.zeros((p.size(-1), p.size(-1)), device=cfg.device) for layer, p in tuning_params.items()}
+    global_AtA_w = {} if coupled_state is not None else {
+        layer: torch.zeros(p.size(-1), device=cfg.device) for layer, p in tuning_params.items()}
     AtA_ridge = dict()
 
     previous_global_update = None
@@ -224,9 +223,11 @@ def learn_continually():
                     is_converged = False
                     mahal_history[count_save + 1] = []
                     cooldown = COOLDOWN_LIMIT
-                    for layer in tuning_params.keys():
+                    for layer in global_At_A:
                         global_At_A[layer].zero_()
                         global_AtA_w[layer].zero_()
+                    if coupled_state is not None:
+                        coupled_state.reset()
                     reset_ia3_to_identity(vit_model, cfg.device)
                     online_gauss.reset()
                     if route_gauss is not None:
@@ -244,7 +245,7 @@ def learn_continually():
             train_one_batch(model=vit_model, criterion=criterion, input=input, target=target,
                              optimizer=optimizer, device=cfg.device, max_norm=1.0,
                              set_training_mode=True, task_id=count_save, class_mask=new_classes,
-                             cache_features=imp.fast_head)
+                             cache_features=imp.fast_head, efficient_loop=cfg.runtime.efficient_head_loop)
             vit_model.eval()
 
             # Sync the (just-updated) head into the Jacobian-computation
@@ -262,7 +263,9 @@ def learn_continually():
                 input, target, global_At_A, global_AtA_w, AtA_ridge, net_g, jacobian_fn,
                 vit_model, tuning_params, backbone, eta=TANGENT_ETA, lambda_=TANGENT_RIDGE_LAMBDA,
                 max_epochs=imp.refine_max_iters, fast_solve=imp.fast_solve, select_metric=imp.select_metric,
-                accumulate=imp.accumulate, select_tol=imp.select_tol)
+                accumulate=imp.accumulate, select_tol=imp.select_tol,
+                clear_cache=cfg.runtime.empty_cache_each_batch, coupled_state=coupled_state,
+                residual_target=imp.tangent_residual_target)
             apply_ia3_updates(vit_model, global_updates, cfg.device)
 
             # Accuracy of the global update on the current batch (classes outside

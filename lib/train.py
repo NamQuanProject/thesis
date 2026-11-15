@@ -34,7 +34,8 @@ def tangent_tuning_a_batch(
     input, target, global_At_A, global_AtA_w, AtA_ridge,
     net_g, jacobian_fn, model, tuning_params, backbone,
     max_epochs=200, patience=3, eta=0.03, lambda_=5e-6,
-    fast_solve=False, select_metric="acc", accumulate="merge", select_tol=0.0,
+    fast_solve=False, select_metric="acc", accumulate="merge", select_tol=0.0, clear_cache=True,
+    coupled_state=None, residual_target=True,
 ):
     device = cfg.device
     input = input.to(device)
@@ -50,6 +51,16 @@ def tangent_tuning_a_batch(
     J = jacobian_fn(tuning_params, input, target)
     for k in list(J.keys()):
         J[k] = J[k].detach()
+
+    if coupled_state is not None:
+        from lib.coupled_tangent import tune_coupled_batch
+        updates = tune_coupled_batch(input, target, logits, J, model, coupled_state,
+                                    max_epochs, patience, eta, lambda_, select_metric, select_tol,
+                                    residual_target=residual_target)
+        del J
+        if clear_cache:
+            empty_cache(device)
+        return updates
 
     # 3) Per-parameter-block design matrix and (ridge-regularized) normal
     # equations, reused across the soft-target refinement iterations below.
@@ -130,7 +141,8 @@ def tangent_tuning_a_batch(
     # per-batch ridge solutions, g += A^T A w_b, which equals A^T applied to a
     # ridge-shrunk target A A^T (A A^T + lambda I)^{-1} b_b. `accumulate="joint"`
     # uses the paper's Eq. (5), g += A^T b_b, i.e. the joint ridge regression
-    # over every batch of the segment. Both are order-invariant.
+    # over every batch of the segment. The sums are order-invariant for fixed
+    # Jacobians/selected targets; upstream head updates remain order-dependent.
     global_updates = {k: torch.zeros(A_cache[k]['d'], device=device) for k in tuning_params.keys()}
     for name in tuning_params.keys():
         ATA = A_cache[name]['ATA']
@@ -148,13 +160,15 @@ def tangent_tuning_a_batch(
             global_updates[name] = torch.linalg.solve(global_At_A[name] + lambda_ * I, global_AtA_w[name])
 
     del J, A_cache
-    empty_cache(device)
+    if clear_cache:
+        empty_cache(device)
     return global_updates
 
 
 def train_one_batch(model: torch.nn.Module, criterion, input: torch.Tensor, target: torch.Tensor,
                      optimizer: torch.optim.Optimizer, device: torch.device, max_norm: float = 0,
-                     set_training_mode=True, task_id=-1, class_mask=None, cache_features=False):
+                     set_training_mode=True, task_id=-1, class_mask=None, cache_features=False,
+                     efficient_loop=False):
     """Gradient-based warm start of the classification head on one batch.
 
     `task_id` is accepted for API/logging symmetry with the rest of the
@@ -172,10 +186,19 @@ def train_one_batch(model: torch.nn.Module, criterion, input: torch.Tensor, targ
         with torch.no_grad():
             features = model(input)['pre_logits']
 
-    for _ in range(cfg.dtask.epochs):
-        metric_logger = MetricLogger(delimiter="  ")
-        metric_logger.add_meter('Lr', SmoothedValue(window_size=1, fmt='{value:.6f}'))
-        metric_logger.add_meter('Loss', SmoothedValue(window_size=1, fmt='{value:.4f}'))
+    # The reference reports only the last epoch (it recreates the logger each
+    # iteration). Preserve that report and every optimizer step, while optionally
+    # avoiding discarded top-k metrics and an extra device barrier per epoch.
+    not_mask = None
+    if class_mask is not None:
+        not_mask = torch.tensor(np.setdiff1d(np.arange(cfg.dtask.nb_classes), class_mask),
+                                dtype=torch.int64, device=device)
+    for epoch in range(cfg.dtask.epochs):
+        report_metrics = not efficient_loop or epoch == cfg.dtask.epochs - 1
+        if report_metrics:
+            metric_logger = MetricLogger(delimiter="  ")
+            metric_logger.add_meter('Lr', SmoothedValue(window_size=1, fmt='{value:.6f}'))
+            metric_logger.add_meter('Loss', SmoothedValue(window_size=1, fmt='{value:.4f}'))
 
         if features is not None:
             logits = model(features, fc_only=True)['logits']
@@ -185,13 +208,12 @@ def train_one_batch(model: torch.nn.Module, criterion, input: torch.Tensor, targ
         # Mask out classes not present in this batch. We cannot mask by task
         # identity (task-free setting), only by the classes actually
         # observed in the current streaming batch.
-        if class_mask is not None:
-            not_mask = np.setdiff1d(np.arange(cfg.dtask.nb_classes), class_mask)
-            not_mask = torch.tensor(not_mask, dtype=torch.int64).to(device)
+        if not_mask is not None:
             logits = logits.index_fill(dim=1, index=not_mask, value=float('-inf'))
 
         loss = criterion(logits, target)
-        acc1, acc5 = accuracy(logits, target, topk=(1, min(5, logits.shape[1])))
+        if report_metrics:
+            acc1, acc5 = accuracy(logits, target, topk=(1, min(5, logits.shape[1])))
 
         if not math.isfinite(loss.item()):
             print(f"Loss is {loss.item()}, stopping training")
@@ -201,12 +223,14 @@ def train_one_batch(model: torch.nn.Module, criterion, input: torch.Tensor, targ
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
         optimizer.step()
-        synchronize(device)
+        if not efficient_loop:
+            synchronize(device)
 
-        metric_logger.update(Loss=loss.item())
-        metric_logger.update(Lr=optimizer.param_groups[0]["lr"])
-        metric_logger.meters['Acc@1'].update(acc1.item(), n=input.shape[0])
-        metric_logger.meters['Acc@5'].update(acc5.item(), n=input.shape[0])
+        if report_metrics:
+            metric_logger.update(Loss=loss.item())
+            metric_logger.update(Lr=optimizer.param_groups[0]["lr"])
+            metric_logger.meters['Acc@1'].update(acc1.item(), n=input.shape[0])
+            metric_logger.meters['Acc@5'].update(acc5.item(), n=input.shape[0])
 
     metric_logger.synchronize_between_processes()
     log('* Acc@1 {top1.global_avg:.3f} Acc@5 {top5.global_avg:.3f} loss {losses.global_avg:.3f}'
