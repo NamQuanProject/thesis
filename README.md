@@ -1,243 +1,229 @@
-# HESTIA: Task-Free Continual Learning via Order-Invariant Linearized Adaptation and Density-Guided Adapter Routing
+# Run the experiments
 
-Welcome to the official code repository for **"Task-Free Continual Learning via Order-Invariant Linearized Adaptation and Density-Guided Adapter Routing"**, accepted at the **Forty-Second Annual Conference on Uncertainty in Artificial Intelligence (UAI 2026)**.
+## 1. Get the code on the GPU server
 
-**Authors:** Hang Thi-Thuy Le<sup>1</sup>, Nam-Quan Nguyen<sup>2</sup>, Lam-Huy Nguyen<sup>2</sup>, Dien Dinh<sup>2</sup>, Minh Hoang<sup>3</sup>, Trong Nghia Hoang<sup>1</sup>
-
-<sup>1</sup>Washington State University, Pullman, Washington, USA
-<sup>2</sup>University of Science, VNU-HCM, Ho Chi Minh City, Vietnam
-<sup>3</sup>Princeton University, Princeton, New Jersey, USA
-
-[Paper](https://proceedings.mlr.press/v337/le26a.html) | [OpenReview](https://openreview.net/forum?id=Gu542jC262)
-
-## 📜 Abstract
-
-Task-free continual learning (TFCL) requires adapting to non-stationary streams without task boundaries or identifiers, where catastrophic forgetting is amplified by both distribution shifts and order-sensitive batch-streaming optimization. We propose HESTIA, which couples order-invariant linearized adaptation with density-guided adapter routing. Linearizing around a pretrained model yields additive sufficient statistics across batches, producing updates that are invariant to batch order so reducing order-induced forgetting without replay. To handle distribution shifts, HESTIA dynamically expands adapters and associates each with a density-based task key modeling its induced embedding distribution. The same density signals enable lightweight change-point detection during training and principled retrieval at inference by selecting the most compatible adapter via likelihood-based scoring. We further provide a theoretical characterization of retrieval error in terms of density estimation quality and cross-adapter embedding separability. Across benchmarks, HESTIA consistently improves accuracy and achieves lower forgetting than strong TFCL baselines under both standard and realistic streaming scenarios.
-
-## 👀 Overview
-
-HESTIA addresses two complementary sources of catastrophic forgetting in task-free continual learning:
-
-1. **Order-induced forgetting**, arising from batch-order-dependent gradient updates within a locally stationary stream. HESTIA mitigates this via an **order-invariant linearized adaptation** framework built around a linearization of the pretrained model, which yields additive sufficient statistics that accumulate across batches without requiring a replay buffer.
-2. **Distribution-shift-induced forgetting**, arising when the underlying data distribution changes over time. HESTIA addresses this via **density-guided adapter routing**: it dynamically expands lightweight adapters and pairs each with a Gaussian-mixture-based task key summarizing its induced embedding distribution. The same density signals drive lightweight change-point detection during training and likelihood-based adapter retrieval at inference.
-
-We also provide a theoretical characterization of retrieval error in terms of density estimation quality and cross-adapter embedding separability, and validate HESTIA on Split CIFAR-10/100, Split ImageNet-R, and VTAB5T against strong TFCL baselines.
-
-## 🛠️ Environment Setup
-
-We recommend using a Python 3.12 virtual environment.
+For a new checkout:
 
 ```bash
-python3.12 -m venv venv
-source venv/bin/activate
-
-pip install -r requirements.txt
+mkdir -p /workspace/ContinualLearningThesis
+git clone https://github.com/NamQuanProject/thesis.git /workspace/ContinualLearningThesis/repository
+cd /workspace/ContinualLearningThesis/repository
 ```
 
-## 🚀 Running Experiments
-
-The active preparation target is **ImageNet-R** (200 classes, 20 streaming
-tasks). See [the ImageNet-R runbook](docs/imagenet_r_experiments.md) for environment
-setup, explicit data/weight preparation, the diagnostic pilot, paired comparisons,
-and checkpoint re-evaluation. Training commands refuse nonempty output directories.
+For an existing checkout, use its actual directory and update it before creating
+a new run (replace `/path/to/your/thesis-checkout`):
 
 ```bash
-# After server setup and dataset preparation, print the planned commands:
-python scripts/run_imagenet_r.py --stage pilot
-# Run the small GPU pilot, including checkpoint re-evaluation:
-python scripts/run_imagenet_r.py --stage pilot --execute
-# Run the first predeclared baseline/Gaussian comparison:
-python scripts/run_imagenet_r.py --stage compare --seeds 15 --execute
+cd /path/to/your/thesis-checkout
+git pull --ff-only origin main
 ```
 
-Protocol version 2 fixes boundary class masks and evaluation bookkeeping, isolates
-training RNGs, and uses a recorded, non-destructive ImageNet-R partition. Baselines
-must be rerun under this same protocol; previous published scores are not paired
-controls. The payback-audit research manuscript described in the earlier conversation
-is not implemented in this checkout. These runs evaluate the existing HESTIA and
-Gaussian-routing code, not that proposed controller.
+## 2. Install the environment
 
-The current [support-local specialist research](docs/support_specialists.md)
-tests a stronger inference question: can overlapping experts improve a global
-classifier without hard task exclusion, and can inference stop with a certificate
-that top-1 matches the full bank? `--variants mass` trains the opt-in path with
-frozen expert heads and global training-feature statistics. The research note
-contains proofs, close prior work, limitations and the ImageNet-R ablation plan.
-No accuracy improvement or ICML-level novelty has been established.
+Use Python 3.11 or 3.12 on a CUDA GPU server. Run the setup once per environment:
 
 ```bash
-python scripts/run_imagenet_r.py --stage pilot --variants mass --execute
-python scripts/evaluate_specialists.py --run-dir PATH_TO_COMPLETED_MASS_RUN \
-  --output-dir results/mass-inference-ablation
+bash scripts/setup_server.sh
+export THESIS_PYTHON="$PWD/.venv/bin/python"
+export THESIS_DATA=/workspace/ContinualLearningThesis/data
+export THESIS_RESULTS=/workspace/ContinualLearningThesis/results
 ```
 
-The separate [coupled residual tangent candidate](docs/coupled_research.md) changes
-adaptation itself: it fits interacting IA3 blocks jointly against a residual
-target and consolidates derivative summaries with a bounded sketch. Its novelty
-and performance are research questions. The document includes the mathematical
-scope, closest prior work, and predeclared ablations.
+To reuse the environment from the earlier server setup instead:
 
 ```bash
-python scripts/run_imagenet_r.py --stage compare --seeds 15 \
-  --variants coupled coupled_raw coupled_gauss --jacobian-mode per_sample \
-  --jacobian-chunk-size 0 --efficient-runtime --output-root results/coupled-study --execute
+export THESIS_PYTHON=/workspace/ContinualLearningThesis/.venv/bin/python
+export THESIS_DATA=/workspace/ContinualLearningThesis/data
+export THESIS_RESULTS=/workspace/ContinualLearningThesis/results
 ```
 
-To reproduce our main results, run the following commands, one for each benchmark:
+## 3. Prepare ImageNet-R and pretrained weights
 
 ```bash
-# Split CIFAR-10
-python main.py --cfg configs/cifar-10-seed-15.yml
-
-# Split CIFAR-100
-python main.py --cfg configs/cifar-100-seed-15.yml
-
-# Split ImageNet-R
-python main.py --cfg configs/imgn-r-seed-15.yml
-
-# VTAB5T
-python main.py --cfg configs/vtab-large-seed-25.yml
+"$THESIS_PYTHON" scripts/prepare_imagenet_r.py \
+  --data-path "$THESIS_DATA" --split-seed 0 --download --weights
+"$THESIS_PYTHON" scripts/preflight.py \
+  --device cuda --data-path "$THESIS_DATA" --check-data --out preflight.json
 ```
 
-> **Note on VTAB5T:** this dataset must be downloaded manually from https://github.com/google-research/task_adaptation and placed into `./local_datasets/vtab_data/` before running the corresponding config.
-
-Each config file specifies the dataset, streaming protocol, backbone, and HESTIA-specific hyperparameters (ridge coefficient, change-point window/tolerance, number of Gaussian mixture components, etc.) used in our experiments.
-
-## 🧪 Thesis improvements (this fork)
-
-Routing and solver variants sit behind `cfg.improve.*` (see `lib/config.py`).
-Defaults retain HESTIA's adaptation and routing choices, with the protocol fixes
-described above. Algebraic speedups are checked on small offline fixtures by
-`tests/test_improvements.py`; this is not proof of identical full benchmark results.
-
-| Option | Values (default first) | Purpose |
-|---|---|---|
-| `improve.routing_key` | `gmm`, `class_gauss` | original online diagonal GMM key, or order-invariant class-conditional Gaussian keys (additive statistics, OAS-shrunk covariance) |
-| `improve.routing_space` | `adapter`, `pretrained` | embed with the routed adapter (original) or once with the frozen backbone |
-| `improve.gmm_score` / `improve.gmm_var_shrink` | `mahal_min` / `0` ; `nll` / `τ` | original min-Mahalanobis score, or the GMM log-likelihood with variance shrinkage |
-| `improve.key_view` | `aug`, `clean` | fit `class_gauss` keys on the augmented or the clean (test-transform) view |
-| `improve.cov_type`, `cov_scope`, `cov_shrink_mode`, `cov_shrink` | `full`, `shared`, `oas`, `0.1` | covariance of the class-conditional keys |
-| `improve.routing_unit` | `batch`, `sample` | paper protocol (one adapter per test batch) or per-sample routing |
-| `improve.fusion_alpha` | `0` | fuse the routed head with the class-Gaussian posterior |
-| `improve.select_metric` | `acc`, `loss` | soft-target selection criterion in the linearized update |
-| `improve.select_tol`, `improve.refine_max_iters` | `0`, `200` | minimum improvement / iteration cap of the soft-target refinement |
-| `improve.accumulate` | `merge`, `joint` | released accumulation `g += AᵀA w_b`, or paper Eq. 5 `g += Aᵀ b_b` |
-| `improve.tangent_solver` | `block`, `coupled_sketch` | released blockwise solve or the joint research candidate |
-| `improve.tangent_sketch_rank` / `tangent_residual_target` | `128` / `true` | bounded derivative summary and residual-offset ablation for the candidate |
-| `improve.device` | `auto` | cuda > mps > cpu |
+Reuse the same data directory and `imagenet-r-split-seed0.json` for all compared
+runs. To inspect existing data without permitting a download:
 
 ```bash
-# recommended improved setting
-python main.py --cfg configs/improved/imgn-r-seed-15.yml
-# any flag from the command line; each run writes <output_dir>/result.json
-python main.py --cfg configs/imgn-r-seed-15.yml --seed 30 --tag cg --output_dir results/imgn-r/cg/seed30/ \
-    --set improve.routing_key=class_gauss improve.routing_space=pretrained improve.key_view=clean
-# fast routing-only comparison of all key variants on cached pretrained features
-python scripts/routing_probe.py --cfg configs/imgn-r-seed-15.yml
-# full ablation grid (DRY_RUN=1 prints one command per line) and summary table
-DRY_RUN=1 scripts/run_ablation.sh configs/imgn-r-seed-15.yml all "15 30 45"
-python scripts/summarize_results.py results/
-# checks: unit/equivalence tests and a synthetic end-to-end smoke run
-python -m pytest -q tests/test_improvements.py && python tests/smoke_pipeline.py
+"$THESIS_PYTHON" scripts/prepare_imagenet_r.py --data-path "$THESIS_DATA" --split-seed 0
 ```
 
-## 📈 Running Baselines
-
-We provide the codebase to reproduce the baseline methods evaluated in our paper inside the `baselines/` directory (in this thesis repository they live in the untracked reference copy `baseline/HESTIA/baselines/`). 
-
-### 1. L2P and DualPrompt
-The L2P and DualPrompt baselines are implemented via the HiDe-Prompt codebase.
+## 4. Create an immutable source checkout and a fresh output directory
 
 ```bash
-cd baselines/HiDe-Prompt/
-
-# Split CIFAR-10
-python -m main cifar10_l2p --seed 15
-python -m main cifar10_dualprompt --seed 15
-
-# Split CIFAR-100
-python -m main cifar100_l2p --seed 15
-python -m main cifar100_dualprompt --seed 15
-
-# Split ImageNet-R
-python -m main imr_l2p --seed 15
-python -m main imr_dualprompt --seed 15
-
-# VTAB5T
-python -m main vtab5t_large_l2p --seed 15
-python -m main vtab5t_large_dualprompt --seed 15
+export THESIS_COMMIT="$(git rev-parse --short HEAD)"
+export THESIS_RUN_ID="${THESIS_COMMIT}-$(date -u +%Y%m%dT%H%M%SZ)"
+export THESIS_SOURCE="/workspace/ContinualLearningThesis/runs/$THESIS_RUN_ID"
+export THESIS_OUTPUT="$THESIS_RESULTS/$THESIS_RUN_ID"
+git worktree add --detach "$THESIS_SOURCE" HEAD
+cd "$THESIS_SOURCE"
 ```
 
-### 2. RanPAC
+Keep this checkout unchanged while its jobs run. Use a new run ID for another
+attempt; the launcher refuses to overwrite existing results.
+
+## 5. Run the short pilot
+
+Preview the commands first; this does not start training:
 
 ```bash
-cd baselines/RanPAC/
-
-# Split CIFAR-10
-python -m main --cfg './config/cifar-10-seed-15-ranpac.yml'
-
-# Split CIFAR-100
-python -m main --cfg './config/cifar-100-seed-15-ranpac.yml'
-
-# Split ImageNet-R
-python -m main --cfg './config/imgn-r-seed-15-ranpac.yml'
-
-# VTAB5T
-python -m main --cfg './config/vtab-large-seed-15-ranpac.yml'
+"$THESIS_PYTHON" scripts/run_imagenet_r.py \
+  --stage pilot --variants base base_sample class_gauss_sample mass --seeds 15 \
+  --data-path "$THESIS_DATA" --output-root "$THESIS_OUTPUT" --device cuda
 ```
 
+Execute the same pilot:
 
-### 3. SD-LORA
 ```bash
-cd baselines/SD-Lora/
-
-# Split CIFAR-10
-python main.py --config=./exps/sdlora_c10_task_free.json \
-  >> sdlora_cifar10.log 2>&1 
-
-# Split CIFAR-100
-python main.py --config=./exps/sdlora_c100_task_free_20_t.json \
-  >> sdlora_cifar100.log 2>&1 
-
-# ImageNet-R
-python main.py --config=./exps/sdlora_ina_task_free_20_t.json \
-  >> sdlora_imagenet_r.log 2>&1 
-
-# VTAB
-python main.py --config=./exps/sdlora_vtab_task_free_10_t.json \
-  >> sdlora_vtab_r.log 2>&1 
-
-# Note that you should change the incremental_learning methods in sdlora.py for running this
+"$THESIS_PYTHON" scripts/run_imagenet_r.py \
+  --stage pilot --variants base base_sample class_gauss_sample mass --seeds 15 \
+  --data-path "$THESIS_DATA" --output-root "$THESIS_OUTPUT" --device cuda --execute
 ```
 
+## 6. Run the 20-task reference experiment
 
-## 📊 Results
-
-HESTIA consistently achieves state-of-the-art accuracy and the lowest forgetting across all evaluated benchmarks (Split CIFAR-10/100, Split ImageNet-R, VTAB5T) while using fewer trainable parameters than competing Transformer-based TFCL baselines. Please refer to the paper for detailed comparisons, ablations, and theoretical analysis.
-
-## 📝 Citation
-
-If you find this code useful in your research, please cite our paper:
-
-```bibtex
-@InProceedings{pmlr-v337-le26a,
-  title = 	 {Task-Free Continual Learning via Order-Invariant Linearized Adaptation and Density-Guided Adapter Routing},
-  author =       {Le, Hang Thi-Thuy and Nguyen, Nam-Quan and Nguyen, Lam-Huy and Dinh, Dien and Hoang, Minh and Hoang, Trong Nghia},
-  booktitle = 	 {Proceedings of the 42nd Conference on Uncertainty in Artificial Intelligence},
-  pages = 	 {3274--3297},
-  year = 	 {2026},
-  editor = 	 {Perković, Emilija and Malinsky, Daniel},
-  volume = 	 {337},
-  series = 	 {Proceedings of Machine Learning Research},
-  month = 	 {17--21 Aug},
-  publisher =    {PMLR},
-  pdf = 	 {https://raw.githubusercontent.com/mlresearch/v337/main/assets/le26a/le26a.pdf},
-  url = 	 {https://proceedings.mlr.press/v337/le26a.html},
-  abstract = 	 {Task-free continual learning (TFCL) aims to adapt models to non-stationary data streams without knowing task boundaries. In TFCL, catastrophic forgetting arises from both the evolving data distributions and the order-sensitive nature of batch-streaming optimization. To address these challenges, we propose a new TFCL framework that mitigates optimization-induced forgetting via order-invariant linearized adaptation during learning and accommodates evolving data distributions via density-guided adapter routing for more accurate and effective adapter retrieval during inference. We also provide a theoretical characterization of retrieval error in terms of density estimation quality and cross-adapter embedding separability. Experiments across multiple benchmarks demonstrate that our proposed method consistently achieves higher accuracy and lower forgetting than strong TFCL baselines under both standard and realistic streaming settings. For reproducibility, our experimental code is available at: https://github.com/Alisia0303/HESTIA.git .}
-}
-
+```bash
+"$THESIS_PYTHON" scripts/run_imagenet_r.py \
+  --stage compare --variants base --seeds 15 \
+  --data-path "$THESIS_DATA" --output-root "$THESIS_OUTPUT" --device cuda --execute
 ```
 
-## 🙏 Acknowledgement
+The launcher runs jobs sequentially and re-evaluates each saved checkpoint before
+starting the next job. Keep the foreground session open until it finishes, or run
+the command under your server's configured process supervisor.
 
-We thank the authors of prior TFCL and PEFT-based continual learning works whose baselines and evaluation protocols informed our experimental design, including L2P, DualPrompt, RanPAC, and SD-LoRA.
+## 7. Run the existing per-sample ablations
+
+```bash
+"$THESIS_PYTHON" scripts/run_imagenet_r.py \
+  --stage compare --variants base_sample class_gauss_sample mass --seeds 15 \
+  --data-path "$THESIS_DATA" --output-root "$THESIS_OUTPUT" --device cuda --execute
+```
+
+For additional paired seeds, use a new output root:
+
+```bash
+"$THESIS_PYTHON" scripts/run_imagenet_r.py \
+  --stage compare --variants base base_sample class_gauss_sample mass --seeds 30 45 \
+  --data-path "$THESIS_DATA" --output-root "${THESIS_OUTPUT}-additional-seeds" \
+  --device cuda --execute
+```
+
+To run the existing solver ablations separately:
+
+```bash
+"$THESIS_PYTHON" scripts/run_imagenet_r.py \
+  --stage compare --variants coupled coupled_raw coupled_gauss --seeds 15 \
+  --data-path "$THESIS_DATA" --output-root "${THESIS_OUTPUT}-solver" --device cuda --execute
+```
+
+## 8. Optionally enable the faster Jacobian mode
+
+Profile and validate the selected mode on the target GPU:
+
+```bash
+"$THESIS_PYTHON" scripts/profile_jacobian.py \
+  --data-path "$THESIS_DATA" --out "${THESIS_OUTPUT}-jacobian.json" \
+  --required-mode per_sample --required-chunk 0
+```
+
+Only after that command succeeds, add these arguments to every compared pilot
+and training command, using a fresh output root:
+
+```text
+--jacobian-mode per_sample --jacobian-chunk-size 0 --efficient-runtime
+```
+
+To impose an optional total launcher time limit, append `--max-seconds 14400`.
+An interrupted run cannot resume training automatically; preserve it and use a
+fresh output directory for a restart.
+
+## 9. Monitor runs from another terminal
+
+Replace the example path with the run directory printed by the launcher:
+
+```bash
+nvidia-smi
+cat /workspace/ContinualLearningThesis/results/RUN_ID/compare/base/seed15/progress.json
+cat /workspace/ContinualLearningThesis/results/RUN_ID/compare/base/seed15/status.json
+tail -n 40 /workspace/ContinualLearningThesis/results/RUN_ID/compare/base/seed15/*.log
+ps -eo pid,etimes,args | rg 'main.py|evaluate.py|run_imagenet_r.py'
+```
+
+Use the process listing alongside status files after a disconnect or server restart;
+a stopped process may leave a stale `running` status on disk.
+
+## 10. Re-evaluate a saved checkpoint
+
+```bash
+"$THESIS_PYTHON" evaluate.py --run-dir "$THESIS_OUTPUT/compare/base/seed15"
+```
+
+For a completed `mass` checkpoint, run all existing inference modes on the same
+images with grouped and mixed batches:
+
+```bash
+"$THESIS_PYTHON" scripts/evaluate_specialists.py \
+  --run-dir "$THESIS_OUTPUT/compare/mass/seed15" \
+  --output-dir "$THESIS_OUTPUT/mass-inference-seed15" \
+  --modes anchor soft_mixture full certified budget \
+  --protocols grouped mixed --device cuda
+```
+
+To check the pilot checkpoint instead, replace `compare/mass/seed15` with
+`pilot/mass/seed15` and choose another fresh evaluation output directory.
+
+## 11. Summarize completed results
+
+```bash
+"$THESIS_PYTHON" scripts/summarize_results.py "$THESIS_OUTPUT" \
+  --csv "$THESIS_OUTPUT/summary.csv"
+```
+
+To include pilot records explicitly:
+
+```bash
+"$THESIS_PYTHON" scripts/summarize_results.py "$THESIS_OUTPUT/pilot" --include-diagnostics
+```
+
+## 12. Run local checks
+
+```bash
+"$THESIS_PYTHON" -m pytest -q tests/
+"$THESIS_PYTHON" scripts/check_predictive_expansion_math.py \
+  --out "$THESIS_OUTPUT/math-checks.json"
+"$THESIS_PYTHON" scripts/check_router_capacity_math.py \
+  --out "$THESIS_OUTPUT/capacity-checks.json"
+```
+
+## 13. Copy artifacts before deleting the server
+
+From a repository checkout on the server, save its Git history with the results:
+
+```bash
+git bundle create "$THESIS_RESULTS/source-history.bundle" --all
+```
+
+From the local machine, replace `KEY_PATH`, `PORT`, and `HOST` with your SSH values:
+
+```bash
+mkdir -p server-backup
+scp -i KEY_PATH -P PORT -r \
+  root@HOST:/workspace/ContinualLearningThesis/results server-backup/
+scp -i KEY_PATH -P PORT -r \
+  root@HOST:/workspace/ContinualLearningThesis/runs server-backup/
+scp -i KEY_PATH -P PORT -r \
+  root@HOST:/workspace/ContinualLearningThesis/logs server-backup/
+scp -i KEY_PATH -P PORT \
+  root@HOST:/workspace/ContinualLearningThesis/data/imagenet-r-split-seed0.json server-backup/
+```
+
+Also copy the `environment.lock.txt` from the directory where setup ran and any
+custom launcher or supervisor scripts. Confirm that the transfers succeeded and
+that every needed run contains both `backbone.pth` and `evaluation_checkpoint.pth`
+before deleting the container.

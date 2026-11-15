@@ -1,0 +1,14 @@
+{
+  "kind": "numerical_identity_checks",
+  "seed": 15,
+  "random_simplex_cases": 10000,
+  "brier_envelope_violations": 0,
+  "brier_sharpness_max_absolute_error": 2.220446049250313e-16,
+  "log_envelope_violations": 0,
+  "soft_brier_gain_max_absolute_error": 3.677613769070831e-16,
+  "gate_gradient_max_absolute_error": 1.2457022080525348e-09,
+  "hidden_regime_hard_routing_gap": 0.5,
+  "same_fixture_soft_brier_improvement": 0.25,
+  "script_sha256": "2685187280a6323c36db63131873540d66c749742edfed237625597380351e06",
+  "qualification": "No training or performance experiment. Numerical checks are not proofs, statistical coverage tests, or evidence of novelty."
+}

@@ -4,6 +4,32 @@ Working title: **Specialize Without Excluding: Bounded Probability Corrections
 for Task-Free Continual Learning**. Updated 2026-11-15. This is an implemented
 research candidate, not a claim of priority, benchmark superiority or ICML readiness.
 
+The next growth/routing/learning research proposal is documented separately in
+[research_next.md](research_next.md). It is not implemented by the `mass` variant.
+
+## Scope correction from the extended literature review
+
+The probability update below is one explicit Euler step of a specialist Markov
+generator: each expert contributes `Q_e = 1 q_e^T - I` on its label scope, and
+`p_new = p_0 (I + sum_e eta_e Q_e)`. Specialist aggregation through continuous-time
+Markov chains already appears in [Li and Lin, IJCAI 2017](https://ijcai.org/proceedings/2017/312).
+This connection must be credited; a probability-preserving update is not by itself
+a new general ensemble principle.
+
+When nontrivial scopes are disjoint and cover the label space, every expert has
+weight `alpha` and the operator reduces exactly to
+`(1-alpha) p_0 + alpha sum_e p_0(S_e) q_e`. This is the conventional scope-mass
+soft mixture control. A claimed improvement over that identical control in this
+case would indicate an implementation/protocol difference, not a new method.
+Uncovered probability mass, singleton scopes, and overlapping scopes require
+separate accounting. The observed pilot has uncovered classes with a probability
+floor, so the two numerical NLL values need not coincide.
+
+The current pilot demonstrates neither a top-1 gain over its anchor nor savings
+from querying fewer than its one expert. The 2026-11-15 full `mass` job had not
+started at the final server inspection. Further evaluation must distinguish these
+limitations from the separate question of certifying partially evaluated ensembles.
+
 ## The scientific question
 
 Can a growing collection of local predictors improve a global classifier while
@@ -184,10 +210,14 @@ run's training cost. A future standalone anchor training control is required for
 training-cost comparisons. FDC, MOS, CTMC aggregation and stronger calibrated
 mixtures remain necessary comparisons before making a broad empirical claim.
 
-Reject the proposed performance story if the full operator fails to improve over
-the anchor/ordinary mixture, if improvement comes only from giving it extra data,
-or if useful accuracy requires evaluating almost every expert. A probability-floor
-theorem is not evidence that accuracy improves. Initial one-seed runs assess
+Reject a predictive-improvement claim if the full operator fails to improve over
+the anchor or equally funded nonidentical mixture controls, or if improvement
+comes only from giving it extra data. In the disjoint, fully covered case the
+scope-mass mixture is identical to the operator: agreement is the required result,
+not a failed ablation. Claims about distinctive overlap behavior require an actual
+overlapping-scope study. Reject an inference-savings claim if useful accuracy
+requires evaluating almost every expert. A probability-floor theorem is not
+evidence that accuracy improves. Initial one-seed runs assess
 viability; they are not a significance study. Freeze choices before paired seeds
 15/30/45 and do not tune from these final test reports. If the method survives,
 extend to recurring/overlapping training streams and another adapter learner;

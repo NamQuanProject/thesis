@@ -1,0 +1,10 @@
+{
+  "kind": "finite_population_identity_checks",
+  "random_comparisons": 1000,
+  "maximum_dual_bound_violation": 0.0,
+  "duplicate_expert_gain_over_bad_router": 0.6075,
+  "duplicate_expert_capacity_lower_bound": -1.0125000000000002,
+  "useful_new_expert_capacity_lower_bound": 0.1875,
+  "script_sha256": "3a5b191ffe43d9d1c54bd5ac6ac22403f04ba4e8e0f7b5bd1e61b14be92fb0f8",
+  "qualification": "Checks known convex geometry on explicit finite populations. No statistical coverage, learned-model performance, or novelty is established."
+}
