@@ -19,6 +19,8 @@ def main():
     parser.add_argument('--data-path', required=True)
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--repeats', type=int, default=3)
+    parser.add_argument('--required-mode', choices=('batch', 'per_sample'), default='per_sample')
+    parser.add_argument('--required-chunk', type=int, choices=(0, 1, 4), default=0)
     args = parser.parse_args()
     if args.repeats < 1:
         parser.error('repeats must be positive')
@@ -51,6 +53,9 @@ def main():
         p.requires_grad = False
     params = collect_ia3_params(net)
     modes = [('batch', 1), ('batch', 4), ('per_sample', 4), ('per_sample', 0)]
+    selected = (args.required_mode, args.required_chunk)
+    if selected not in modes:
+        parser.error('The requested mode/chunk pair is not included in this profile')
     functions = {str(pair): build_ia3_jacobian(net, *pair) for pair in modes}
     reference = {k: v.detach() for k, v in functions[str(modes[0])](params, x, y).items()}
     records = {str(pair): {'mode': pair[0], 'chunk': pair[1], 'seconds': [], 'peak_allocated_bytes': 0,
@@ -80,11 +85,15 @@ def main():
         processes = 'unavailable'
     result = {'kind': 'training_batch_jacobian_profile', **source_identity(), **environment(),
               'batch_size': len(y), 'gpu_processes_at_end': processes, 'results': list(records.values()),
+              'required_mode': args.required_mode, 'required_chunk': args.required_chunk,
+              'required_mode_passed': records[str(selected)]['equivalent'],
               'qualification': 'One training batch; timings may include concurrent work. No accuracy benchmark.'}
     write_json(args.out, result)
     print(json.dumps(result, indent=2), flush=True)
-    if not all(record['equivalent'] for record in records.values()):
-        raise RuntimeError('Jacobian equivalence failed; do not deploy optimized execution')
+    # A rejected alternative remains in the report. It must not veto a different,
+    # explicitly selected mode that passed; never loosen the numerical tolerance.
+    if not records[str(selected)]['equivalent']:
+        raise RuntimeError(f'Jacobian equivalence failed for selected mode {selected}; do not deploy it')
 
 
 if __name__ == '__main__':
