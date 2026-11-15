@@ -6,13 +6,16 @@ import random
 import argparse
 import pprint
 import copy
+import time
+from itertools import islice
 import models.model_register
 
-from lib.config import cfg, cfg_from_file, cfg_from_list
+from lib.config import cfg, cfg_from_file, cfg_from_list, validate_config
 from lib.utils import *
 from lib.device import resolve_device, autocast
 from lib.ia3 import is_ia3_param, collect_ia3_params, apply_ia3_updates, reset_ia3_to_identity
-from lib.checkpointing import save_task_checkpoint
+from lib.checkpointing import save_task_checkpoint, atomic_torch_save
+from lib.experiment import begin_run, finish_run, write_json, preserve_rng_state, loader_manifest
 from lib.task_keys import build_key_bank
 from data.dataset import *
 from utils.vision import *
@@ -72,9 +75,12 @@ def snapshot_adapter(global_updates, online_gauss):
 def learn_continually():
     log('\nRunning experiments using TANGENT FINETUNING')
     imp = cfg.improve
-    tasks = range(cfg.continual.n_tasks)
+    started = time.monotonic()
+    tasks = list(range(cfg.continual.n_tasks))
     if cfg.continual.shuffle_task:
         tasks = torch.randperm(cfg.continual.n_tasks).tolist()
+    if cfg.runtime.max_tasks:
+        tasks = tasks[:cfg.runtime.max_tasks]
 
     # Define ViT model.
     vit_model = create_model(
@@ -92,6 +98,8 @@ def learn_continually():
 
     # Load datasets.
     data_loader, class_mask = build_continual_dataloader(batch_size=cfg.dtask.batch_size)
+    stream = loader_manifest(data_loader, class_mask, tasks)
+    write_json(os.path.join(cfg.dtask.output_dir, 'stream.json'), stream)
     log('class_mask %s ' % class_mask)
     log('Number of classes %d ' % cfg.dtask.nb_classes)
 
@@ -103,6 +111,7 @@ def learn_continually():
     net_g = Net(backbone)
     net_g.to(cfg.device)
     net_g.eval()
+    atomic_torch_save(backbone.state_dict(), os.path.join(cfg.dtask.output_dir, 'backbone.pth'))
 
     tuning_params = collect_ia3_params(net_g)
     log("Tuning parameters are")
@@ -119,7 +128,7 @@ def learn_continually():
         """Wraps `net_g` so that `torch.func.jacrev` can differentiate w.r.t. `params`."""
         return functional_call(net_g, params, (X, target))
 
-    jacobian_fn = jacrev(wrapped_g, argnums=0)
+    jacobian_fn = jacrev(wrapped_g, argnums=0, chunk_size=cfg.runtime.jacobian_chunk_size or None)
 
     global_At_A = {layer: torch.zeros((p.size(-1), p.size(-1)), device=cfg.device)
                    for layer, p in tuning_params.items()}
@@ -136,32 +145,39 @@ def learn_continually():
     mahal_history = {count_save: []}
     within_seen_classes = set()
     adapter_bank = []                    # finalized distributions: {'ia3', 'gmm'}
-    key_bank = build_key_bank(cfg)       # class-conditional keys (None for the original GMM routing)
+    key_bank = build_key_bank(cfg, feature_dim=vit_model.num_features)
     acc_matrix = np.zeros((cfg.continual.n_tasks, cfg.continual.n_tasks))
 
     criterion = torch.nn.CrossEntropyLoss().to(cfg.device)
     optimizer = optim.Adam(vit_model.parameters(), lr=HEAD_LR)
-    online_gauss = OnlineDiagonalGMM(n_clusters=cfg.signature.n_clusters, feature_dim=768, device="cpu",
+    online_gauss = OnlineDiagonalGMM(n_clusters=cfg.signature.n_clusters, feature_dim=vit_model.num_features, device="cpu",
                                       split_threshold=cfg.signature.split_threshold, cfg=cfg)
     # Ablation "original GMM key, pretrained embedding space": a second GMM with
     # the same hyper-parameters, used only for routing (detection is unchanged).
     route_gauss = None
     if imp.routing_key == 'gmm' and imp.routing_space == 'pretrained':
-        route_gauss = OnlineDiagonalGMM(n_clusters=cfg.signature.n_clusters, feature_dim=768, device="cpu",
+        route_gauss = OnlineDiagonalGMM(n_clusters=cfg.signature.n_clusters, feature_dim=vit_model.num_features, device="cpu",
                                          split_threshold=cfg.signature.split_threshold, cfg=cfg)
     log_gmm_summary(online_gauss)
 
     for task_id in tasks:
         log(f"Task {task_id}: {len(data_loader[task_id]['train'])} training batches")
 
-    for task_id in tasks:
-        for (input, target) in data_loader[task_id]["train"]:
+    seen_tasks = []
+    training_samples = 0
+    for step, task_id in enumerate(tasks):
+        seen_tasks.append(task_id)
+        batches = data_loader[task_id]["train"]
+        if cfg.runtime.max_train_batches:
+            batches = islice(batches, cfg.runtime.max_train_batches)
+        for (input, target) in batches:
             # With `key_view == 'clean'` the loader also returns the test-transform view.
             input_key = None
             if isinstance(input, (list, tuple)):
                 input, input_key = input
                 input_key = input_key.to(cfg.device)
             input, target = input.to(cfg.device), target.to(cfg.device)
+            training_samples += len(target)
             new_classes = torch.unique(target).tolist()
             target_classes = set(new_classes)
             log(f"New class coming: {new_classes}")
@@ -199,7 +215,7 @@ def learn_continually():
 
                     save_task_checkpoint(cfg.dtask.output_dir, count_save, global_At_A, global_AtA_w,
                                           online_gauss, global_updates=previous_global_update,
-                                          route_gauss=route_gauss)
+                                          route_gauss=route_gauss, save_ridge_stats=cfg.runtime.save_ridge_stats)
                     adapter_bank.append(snapshot_adapter(previous_global_update, route_gauss or online_gauss))
                     task_class_mask[count_save] = list(within_seen_classes)
 
@@ -219,12 +235,17 @@ def learn_continually():
                     count_save += 1
                     batch_idx = 0
 
+            # The triggering batch belongs to the new segment too. Without this
+            # update, its labels can be absent from the saved inference mask.
+            within_seen_classes |= target_classes
+
             # Gradient-based warm start of the classification head for the ViT.
             log(f"Within seen class: {within_seen_classes}")
             train_one_batch(model=vit_model, criterion=criterion, input=input, target=target,
                              optimizer=optimizer, device=cfg.device, max_norm=1.0,
                              set_training_mode=True, task_id=count_save, class_mask=new_classes,
                              cache_features=imp.fast_head)
+            vit_model.eval()
 
             # Sync the (just-updated) head into the Jacobian-computation
             # copies before solving the closed-form update.
@@ -251,7 +272,7 @@ def learn_continually():
                 not_mask = np.setdiff1d(np.arange(cfg.dtask.nb_classes), new_classes)
                 not_mask = torch.tensor(not_mask, dtype=torch.int64).to(cfg.device)
                 out = out.index_fill(dim=1, index=not_mask, value=float('-inf'))
-                acc1, acc5 = accuracy(out, target, topk=(1, 5))
+                acc1, acc5 = accuracy(out, target, topk=(1, min(5, out.shape[1])))
             log(f"GLOBAL UPDATES ON BATCH {batch_idx} is: {acc1}")
 
             with torch.no_grad():
@@ -262,10 +283,8 @@ def learn_continually():
                     pre_features = backbone(input)['pre_logits'].cpu()
                 # KMeans init / split offsets draw from the global RNGs; isolate them
                 # so the data stream stays identical to the baseline run.
-                np_state = np.random.get_state()
-                with torch.random.fork_rng(devices=[]):
+                with preserve_rng_state():
                     route_gauss.update(pre_features, batch_idx)
-                np.random.set_state(np_state)
 
             # Order-invariant class-conditional task key (additive statistics).
             if key_bank is not None:
@@ -282,31 +301,46 @@ def learn_continually():
             batch_idx += 1
 
         # Evaluation at the end of each task.
-        with torch.no_grad():
+        with torch.no_grad(), preserve_rng_state():
             temp_class_mask = dict(task_class_mask)
             temp_class_mask[count_save] = list(within_seen_classes)
-            # A fresh model per evaluation, as in the original code (this also keeps
-            # the global RNG trajectory, hence the data stream, identical to it).
-            eval_model = _build_vit_model()
+            # Use the exact frozen backbone, including when pretrained=False.
+            # This also avoids reloading/downloading ViT weights at every task.
+            eval_model = copy.deepcopy(backbone).eval()
             eval_model.head.weight.copy_(vit_model.head.weight)
             eval_model.head.bias.copy_(vit_model.head.bias)
             adapters = adapter_bank + [snapshot_adapter(previous_global_update, route_gauss or online_gauss)]
             if key_bank is not None:
                 log(f"Class-Gaussian keys: {key_bank.describe()}")
             task_test_stats = evaluate_bank(eval_model, adapters, key_bank, data_loader, temp_class_mask,
-                                            task_id, acc_matrix, cfg)
-            torch.save(acc_matrix, os.path.join(cfg.dtask.output_dir, 'global_acc_matrix.pth'))
+                                            step, acc_matrix, cfg, seen_task_ids=seen_tasks)
+            atomic_torch_save(torch.from_numpy(acc_matrix), os.path.join(cfg.dtask.output_dir, 'global_acc_matrix.pth'))
+            # One coherent bundle is published after each completed evaluation.
+            # It supports portable re-evaluation, not training resume.
+            atomic_torch_save({
+                'version': 1, 'adapters': adapters,
+                'key_bank': None if key_bank is None else key_bank.state_dict(),
+                'head_weight': vit_model.head.weight, 'head_bias': vit_model.head.bias,
+                'class_mask': temp_class_mask, 'seen_tasks': list(seen_tasks),
+                'acc_matrix': torch.from_numpy(acc_matrix), 'stream': stream,
+            }, os.path.join(cfg.dtask.output_dir, 'evaluation_checkpoint.pth'))
+            write_json(os.path.join(cfg.dtask.output_dir, 'progress.json'), {
+                'completed_tasks': step + 1, 'total_tasks': len(tasks),
+                'training_samples': training_samples, 'elapsed_seconds': time.monotonic() - started,
+                **{k: v for k, v in task_test_stats.items() if k != 'acc_matrix'},
+            })
             log(f"Global Acc Matrix after truth (Not predicted) task {task_id} : \n {task_test_stats['acc_matrix']}")
             del eval_model
 
     # Final checkpoint after the last batch of the last task.
     save_task_checkpoint(cfg.dtask.output_dir, count_save, global_At_A, global_AtA_w, online_gauss,
                           global_updates=global_updates, head_weight=vit_model.head.weight,
-                          head_bias=vit_model.head.bias, mahal_history=mahal_history, route_gauss=route_gauss)
+                              head_bias=vit_model.head.bias, mahal_history=mahal_history, route_gauss=route_gauss,
+                              save_ridge_stats=cfg.runtime.save_ridge_stats)
     task_class_mask[count_save] = list(within_seen_classes)
-    torch.save(task_class_mask, os.path.join(cfg.dtask.output_dir, 'class_mask.pth'))
+    atomic_torch_save(task_class_mask, os.path.join(cfg.dtask.output_dir, 'class_mask.pth'))
     if key_bank is not None:
-        torch.save(key_bank.state_dict(), os.path.join(cfg.dtask.output_dir, 'key_bank.pth'))
+        atomic_torch_save(key_bank.state_dict(), os.path.join(cfg.dtask.output_dir, 'key_bank.pth'))
     log(f"FINAL | avg acc {task_test_stats['avg_acc']:.4f} | forgetting {task_test_stats['forgetting']:.4f} | "
         f"routing (batch) {task_test_stats['routing_batch']:.4f} | routing (sample) {task_test_stats['routing_sample']:.4f} | "
         f"detected distributions {count_save + 1}")
@@ -314,14 +348,17 @@ def learn_continually():
               'avg_acc': float(task_test_stats['avg_acc']), 'forgetting': float(task_test_stats['forgetting']),
               'routing_batch': float(task_test_stats['routing_batch']),
               'routing_sample': float(task_test_stats['routing_sample']),
-              'detected_distributions': count_save + 1, 'improve': dict(cfg.improve)}
-    with open(os.path.join(cfg.dtask.output_dir, 'result.json'), 'w') as f:
-        json.dump(result, f, indent=1)
+              'detected_distributions': count_save + 1, 'improve': dict(cfg.improve),
+              'protocol_version': 2, 'routing_metric': 'selected_adapter_label_coverage',
+              'kind': 'diagnostic' if (cfg.runtime.max_train_batches or cfg.runtime.max_eval_batches or cfg.runtime.max_tasks) else 'benchmark',
+              'elapsed_seconds': time.monotonic() - started, 'training_samples': training_samples,
+              'peak_cuda_memory_bytes': torch.cuda.max_memory_allocated(cfg.device) if cfg.device.type == 'cuda' else None}
+    write_json(os.path.join(cfg.dtask.output_dir, 'result.json'), result)
     return task_test_stats
 
 def main():
     parser = argparse.ArgumentParser(description='TANGENT FINETUNING in Continual Learning')
-    parser.add_argument('--cfg', dest='cfg_file', default='./configs/cifar-100.yml')
+    parser.add_argument('--cfg', dest='cfg_file', default='./configs/imgn-r-seed-15.yml')
     parser.add_argument('--seed', type=int, default=None, help='override the seed in the config')
     parser.add_argument('--output_dir', default=None, help='override dtask.output_dir')
     parser.add_argument('--set', nargs='*', default=[], metavar='KEY=VALUE',
@@ -337,8 +374,12 @@ def main():
         cfg.seed = args.seed
     if args.output_dir is not None:
         cfg.dtask.output_dir = args.output_dir
+    validate_config()
+    cfg.cfg_name, cfg.run_tag = cfg_name, args.tag
+    cfg.device = resolve_device(cfg.improve.device, cfg.gpu_ids)
+    begin_run(cfg)
 
-    log_dir = "logs"
+    log_dir = cfg.dtask.output_dir
     os.makedirs(log_dir, exist_ok=True)
     os.makedirs(cfg.dtask.output_dir, exist_ok=True)
 
@@ -359,17 +400,23 @@ def main():
     log(pprint.pformat(cfg))
 
     cfg.output_dir = os.path.join(cfg.dtask.output_dir, f"{cfg_name}_seed_{cfg.seed}")
-    cfg.cfg_name, cfg.run_tag = cfg_name, args.tag
-    cfg.device = resolve_device(cfg.improve.device, cfg.gpu_ids)
     log(f"Device: {cfg.device}")
 
-    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
 
     set_seed(cfg.seed)
 
-    if cfg.continual.method.run_merlin:
+    if cfg.device.type == 'cuda':
+        torch.cuda.reset_peak_memory_stats(cfg.device)
+    try:
         learn_continually()
+    except BaseException as exc:
+        finish_run(cfg.dtask.output_dir, 'interrupted' if isinstance(exc, KeyboardInterrupt) else 'failed',
+                   error=f'{type(exc).__name__}: {exc}')
+        raise
+    else:
+        finish_run(cfg.dtask.output_dir, 'completed')
 
 if __name__ == '__main__':
     main()

@@ -30,6 +30,10 @@ dist/
 .ruff_cache/
 .env
 .envrc
+.cache/
+environment.lock.txt
+preflight.json
+remote_artifacts/
 
 # OS / editors
 .DS_Store

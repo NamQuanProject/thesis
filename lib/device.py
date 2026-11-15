@@ -11,10 +11,16 @@ import torch
 
 
 def resolve_device(preference: str = "auto", gpu_ids: str = "0") -> torch.device:
+    if preference not in ('auto', 'cuda', 'mps', 'cpu'):
+        raise ValueError(f'Unknown device: {preference}')
     gpu = int(gpu_ids.split(",")[0])
     if preference == "cuda" or (preference == "auto" and torch.cuda.is_available()):
+        if not torch.cuda.is_available() or not 0 <= gpu < torch.cuda.device_count():
+            raise RuntimeError(f'CUDA device {gpu} is unavailable; check nvidia-smi and the PyTorch wheel')
         return torch.device(f"cuda:{gpu}")
     if preference == "mps" or (preference == "auto" and torch.backends.mps.is_available()):
+        if not torch.backends.mps.is_available():
+            raise RuntimeError('Apple MPS is unavailable')
         return torch.device("mps")
     return torch.device("cpu")
 

@@ -105,7 +105,7 @@ def tangent_tuning_a_batch(
         with torch.no_grad():
             out = model(input)["logits"]
             if select_metric == "acc":
-                score, _ = accuracy(out, target, topk=(1, 5))
+                score, _ = accuracy(out, target, topk=(1, min(5, out.shape[1])))
             else:
                 score = -F.cross_entropy(out.float(), target).item()
 
@@ -191,7 +191,7 @@ def train_one_batch(model: torch.nn.Module, criterion, input: torch.Tensor, targ
             logits = logits.index_fill(dim=1, index=not_mask, value=float('-inf'))
 
         loss = criterion(logits, target)
-        acc1, acc5 = accuracy(logits, target, topk=(1, 5))
+        acc1, acc5 = accuracy(logits, target, topk=(1, min(5, logits.shape[1])))
 
         if not math.isfinite(loss.item()):
             print(f"Loss is {loss.item()}, stopping training")

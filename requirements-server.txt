@@ -1,0 +1,5 @@
+# Reference server pair. Install the CUDA wheels before these dependencies.
+# https://pytorch.org/get-started/previous-versions/
+-r requirements.txt
+torch==2.14.1
+torchvision==0.29.1

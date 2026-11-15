@@ -1,7 +1,7 @@
 """Correctness checks for the thesis improvements.
 
 Run from the project root:  .venv/bin/python -m pytest -q tests/   (or python tests/test_improvements.py)
-The ViT-based tests need the pretrained weights in the torch hub cache.
+ViT checks use the actual custom IA3 blocks at tiny dimensions, without downloads.
 """
 import os
 import sys
@@ -17,7 +17,7 @@ from lib.task_keys import ClassGaussianKeyBank, gmm_log_likelihood, gmm_mahal_mi
 
 def test_woodbury_matches_dense_ridge():
     torch.manual_seed(0)
-    for d in (768, 3072):
+    for d in (32, 96):
         A = torch.randn(16, d, dtype=torch.float64) * 0.05
         z = torch.rand(16, dtype=torch.float64)
         lam = 1.0
@@ -132,13 +132,12 @@ def test_class_gauss_accepts_accelerator_tensors():
 
 
 def _vit_setup():
-    import models.model_register  # noqa: F401
-    from timm.models import create_model
+    from models.vision_transformer import VisionTransformer
     from lib.config import cfg
     cfg.device = torch.device("cpu")
     torch.manual_seed(0)
-    model = create_model("vit_base_patch16_224", pretrained=True, num_classes=10, drop_rate=0.0,
-                         drop_path_rate=0.0, drop_block_rate=None, head_type="prompt")
+    model = VisionTransformer(img_size=32, patch_size=16, embed_dim=16, depth=1,
+                              num_heads=2, num_classes=10, drop_rate=0.0, drop_path_rate=0.0)
     for n, p in model.named_parameters():
         p.requires_grad = "head" in n
     return cfg, model
@@ -150,7 +149,7 @@ def test_cached_head_training_is_identical():
     cfg, model = _vit_setup()
     cfg.dtask.epochs = 3
     cfg.dtask.nb_classes = 10
-    x, y = torch.rand(4, 3, 224, 224), torch.tensor([1, 3, 3, 7])
+    x, y = torch.rand(4, 3, 32, 32), torch.tensor([1, 3, 3, 7])
     heads = []
     for cache in (False, True):
         m = copy.deepcopy(model)
@@ -178,7 +177,7 @@ def test_fast_solve_matches_original_tangent_update():
             p = self.model(X)["logits"].softmax(dim=1)
             return torch.gather(p, 1, target.reshape(-1, 1)).squeeze(1)
 
-    x, y = torch.rand(4, 3, 224, 224), torch.tensor([1, 3, 3, 7])
+    x, y = torch.rand(4, 3, 32, 32), torch.tensor([1, 3, 3, 7])
     backbone = copy.deepcopy(model)
     net_g = Net(backbone).eval()
     for p in net_g.parameters():

@@ -17,6 +17,13 @@ from data.dataset_utils import read_image_file, read_label_file
 from PIL import Image
 from collections import defaultdict
 
+
+def seed_worker(worker_id):
+    """Give Python/NumPy augmentation RNGs the DataLoader's independent seed."""
+    seed = torch.initial_seed() % (2 ** 32)
+    np.random.seed(seed)
+    random.seed(seed)
+
 class Lambda(transforms.Lambda):
     def __init__(self, lambd, nb_classes):
         super().__init__(lambd)
@@ -54,12 +61,12 @@ def build_transform(is_train):
 
 def get_dataset(dataset, transform_train, transform_val):
     if dataset == 'CIFAR100':
-        dataset_train = datasets.CIFAR100(cfg.dtask.data_path, train=True, download=True, transform=transform_train)
-        dataset_val = datasets.CIFAR100(cfg.dtask.data_path, train=False, download=True, transform=transform_val)
+        dataset_train = datasets.CIFAR100(cfg.dtask.data_path, train=True, download=cfg.dtask.download, transform=transform_train)
+        dataset_val = datasets.CIFAR100(cfg.dtask.data_path, train=False, download=cfg.dtask.download, transform=transform_val)
     
     elif dataset == 'CIFAR10':
-        dataset_train = datasets.CIFAR10(cfg.dtask.data_path, train=True, download=True, transform=transform_train)
-        dataset_val = datasets.CIFAR10(cfg.dtask.data_path, train=False, download=True, transform=transform_val)
+        dataset_train = datasets.CIFAR10(cfg.dtask.data_path, train=True, download=cfg.dtask.download, transform=transform_train)
+        dataset_val = datasets.CIFAR10(cfg.dtask.data_path, train=False, download=cfg.dtask.download, transform=transform_val)
     
     elif dataset == 'MNIST':
         dataset_train = MNIST_RGB(cfg.dtask.data_path, train=True, download=True, transform=transform_train)
@@ -78,8 +85,11 @@ def get_dataset(dataset, transform_train, transform_val):
         dataset_val = NotMNIST(cfg.dtask.data_path, train=False, download=True, transform=transform_val)
 
     elif dataset == 'Imagenet-R':
-        dataset_train = Imagenet_R(cfg.dtask.data_path, train=True, download=True, transform=transform_train).data
-        dataset_val = Imagenet_R(cfg.dtask.data_path, train=False, download=True, transform=transform_val).data
+        from data.imagenet_r import build_imagenet_r
+        dataset_train, dataset_val, partition = build_imagenet_r(
+            cfg.dtask.data_path, transform_train, transform_val,
+            split_seed=cfg.dtask.split_seed, download=cfg.dtask.download)
+        dataset_train.partition_metadata = dataset_val.partition_metadata = partition
     
     elif dataset == 'TinyImagenet':
         dataset_train = TinyImagenet(cfg.dtask.data_path, train=True, download=True, transform=transform_train).data
@@ -113,7 +123,8 @@ def get_dataset(dataset, transform_train, transform_val):
     return dataset_train, dataset_val
 
 def split_single_dataset(dataset_train, dataset_val, num_samples=0):
-    cfg.dtask.nb_classes = len(dataset_val.classes)
+    if cfg.dtask.nb_classes != len(dataset_val.classes):
+        raise ValueError(f'Configured {cfg.dtask.nb_classes} classes but dataset has {len(dataset_val.classes)}')
     assert cfg.dtask.nb_classes % cfg.continual.n_tasks == 0
     classes_per_task = cfg.dtask.nb_classes // cfg.continual.n_tasks
     print('classes_per_task ', classes_per_task)
@@ -389,13 +400,18 @@ def build_continual_dataloader(batch_size=1, preprocess=None):
                     dataset_train.target_transform = transform_target
                     dataset_val.target_transform = transform_target
 
-        sampler_train = torch.utils.data.RandomSampler(dataset_train)
+        if not len(dataset_train) or not len(dataset_val):
+            raise ValueError(f'Task {i} has an empty training or evaluation partition')
+        train_generator = torch.Generator().manual_seed(cfg.seed + 1009 * i)
+        val_generator = torch.Generator().manual_seed(cfg.seed + 1009 * i + 1000003)
+        sampler_train = torch.utils.data.RandomSampler(dataset_train, generator=train_generator)
         sampler_val = torch.utils.data.SequentialSampler(dataset_val)
 
         data_loader_train = torch.utils.data.DataLoader(
             dataset_train, sampler=sampler_train,
             batch_size=batch_size, #args.batch_size,
             num_workers=cfg.dtask.num_workers,
+            generator=train_generator, worker_init_fn=seed_worker,
             # pin_memory=args.pin_mem,
         )
 
@@ -403,6 +419,7 @@ def build_continual_dataloader(batch_size=1, preprocess=None):
                 dataset_val, sampler=sampler_val,
                 batch_size=batch_size, #args.batch_size,
                 num_workers=cfg.dtask.num_workers,
+                generator=val_generator, worker_init_fn=seed_worker,
                 # pin_memory=args.pin_mem,
             )
         dataloader.append({'train': data_loader_train, 'val': data_loader_val})

@@ -46,6 +46,15 @@ class OnlineDiagonalGMM:
     # ---------------------------------------------------------
     @torch.no_grad()
     def initialize(self, features):
+        if features.ndim != 2 or features.shape[1] != self.D or not len(features):
+            raise ValueError('GMM initialization requires a nonempty [samples, feature_dim] tensor')
+        if not bool(torch.isfinite(features).all()):
+            raise ValueError('GMM features must be finite')
+        # A boundary may fall on a short final batch (including one sample).
+        self.K = min(self.n_clusters, len(features))
+        self.means = torch.zeros(self.K, self.D, device=self.device)
+        self.vars = torch.ones(self.K, self.D, device=self.device) * self.eps
+        self.counts = torch.zeros(self.K, device=self.device)
         feats_np = features.cpu().numpy()
         km = KMeans(n_clusters=self.K, n_init=20)
         labels = km.fit_predict(feats_np)
@@ -144,6 +153,8 @@ class OnlineDiagonalGMM:
             cluster_std = torch.sqrt(self.vars[k].mean())
             if cluster_std > self.split_threshold:
                 dead = torch.argmin(self.counts).item()
+                if dead == k:
+                    continue
                 offset = torch.randn(self.D, device=self.device) * cluster_std
                 self.means[dead] = self.means[k] + offset
                 self.vars[dead] = self.vars[k].clone()
@@ -155,8 +166,9 @@ class OnlineDiagonalGMM:
     def reset(self):
         """Reset all statistics (called when a new distribution/adapter is instantiated)."""
         self.is_initialized = False
-        self.counts.zero_()
-        self.means.zero_()
+        self.K = self.n_clusters
+        self.counts = torch.zeros(self.K, device=self.device)
+        self.means = torch.zeros(self.K, self.D, device=self.device)
         self.vars = torch.ones(self.K, self.D, device=self.device) * self.eps
 
 def detect_convergence_stationary_streaming(

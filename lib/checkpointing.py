@@ -9,9 +9,37 @@ evaluate.py.
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 
 import torch
+
+
+def atomic_torch_save(value, filename):
+    def cpu_state(item):
+        if isinstance(item, torch.Tensor):
+            return item.detach().cpu()
+        if isinstance(item, dict):
+            return {k: cpu_state(v) for k, v in item.items()}
+        if isinstance(item, (list, tuple)):
+            return type(item)(cpu_state(v) for v in item)
+        return item
+
+    path = Path(filename)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=path.name + '.', suffix='.tmp', dir=path.parent)
+    os.close(fd)
+    try:
+        torch.save(cpu_state(value), temporary)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def load_tensor_state(filename):
+    """Explicit safe tensor loading, independent of PyTorch's default/device."""
+    return torch.load(filename, map_location='cpu', weights_only=True)
 
 
 def task_checkpoint_dir(output_dir: str, task_id: int) -> str:
@@ -21,29 +49,30 @@ def task_checkpoint_dir(output_dir: str, task_id: int) -> str:
 
 def save_task_checkpoint(output_dir, task_id, global_At_A, global_AtA_w, online_gauss,
                           global_updates=None, head_weight=None, head_bias=None,
-                          mahal_history=None, route_gauss=None):
+                          mahal_history=None, route_gauss=None, save_ridge_stats=True):
     """Persist the ridge accumulators and the GMM task key for ``task_id``."""
     ckpt_dir = task_checkpoint_dir(output_dir, task_id)
     Path(ckpt_dir).mkdir(parents=True, exist_ok=True)
 
-    torch.save(global_At_A, os.path.join(ckpt_dir, "global_At_A.pth"))
-    torch.save(global_AtA_w, os.path.join(ckpt_dir, "global_AtA_w.pth"))
-    torch.save(online_gauss.means, os.path.join(ckpt_dir, "mean.pth"))
-    torch.save(online_gauss.vars, os.path.join(ckpt_dir, "vars.pth"))
-    torch.save(online_gauss.counts, os.path.join(ckpt_dir, "counts.pth"))
+    if save_ridge_stats:
+        atomic_torch_save({k: v.detach().cpu() for k, v in global_At_A.items()}, os.path.join(ckpt_dir, "global_At_A.pth"))
+        atomic_torch_save({k: v.detach().cpu() for k, v in global_AtA_w.items()}, os.path.join(ckpt_dir, "global_AtA_w.pth"))
+    atomic_torch_save(online_gauss.means, os.path.join(ckpt_dir, "mean.pth"))
+    atomic_torch_save(online_gauss.vars, os.path.join(ckpt_dir, "vars.pth"))
+    atomic_torch_save(online_gauss.counts, os.path.join(ckpt_dir, "counts.pth"))
 
     if global_updates is not None:
-        torch.save(global_updates, os.path.join(ckpt_dir, "global_updates.pth"))
+        atomic_torch_save(global_updates, os.path.join(ckpt_dir, "global_updates.pth"))
     if head_weight is not None:
-        torch.save(head_weight, os.path.join(ckpt_dir, "head_weight.pth"))
+        atomic_torch_save(head_weight, os.path.join(ckpt_dir, "head_weight.pth"))
     if head_bias is not None:
-        torch.save(head_bias, os.path.join(ckpt_dir, "head_bias.pth"))
+        atomic_torch_save(head_bias, os.path.join(ckpt_dir, "head_bias.pth"))
     if mahal_history is not None:
-        torch.save(mahal_history, os.path.join(ckpt_dir, "mahal_history.pth"))
+        atomic_torch_save(mahal_history, os.path.join(ckpt_dir, "mahal_history.pth"))
     if route_gauss is not None:  # routing-only GMM on pretrained embeddings (improve.routing_space)
-        torch.save(route_gauss.means, os.path.join(ckpt_dir, "route_mean.pth"))
-        torch.save(route_gauss.vars, os.path.join(ckpt_dir, "route_vars.pth"))
-        torch.save(route_gauss.counts, os.path.join(ckpt_dir, "route_counts.pth"))
+        atomic_torch_save(route_gauss.means, os.path.join(ckpt_dir, "route_mean.pth"))
+        atomic_torch_save(route_gauss.vars, os.path.join(ckpt_dir, "route_vars.pth"))
+        atomic_torch_save(route_gauss.counts, os.path.join(ckpt_dir, "route_counts.pth"))
 
     return ckpt_dir
 
@@ -61,9 +90,9 @@ def mask_significant_clusters(mean, var, counts, min_count: int = 10):
 def load_task_signature(output_dir, task_id, min_cluster_count: int = 10):
     """Load the masked GMM task key and IA3 ridge solution for ``task_id``."""
     ckpt_dir = task_checkpoint_dir(output_dir, task_id)
-    means = torch.load(os.path.join(ckpt_dir, "mean.pth"))
-    variances = torch.load(os.path.join(ckpt_dir, "vars.pth"))
-    counts = torch.load(os.path.join(ckpt_dir, "counts.pth"))
+    means = load_tensor_state(os.path.join(ckpt_dir, "mean.pth"))
+    variances = load_tensor_state(os.path.join(ckpt_dir, "vars.pth"))
+    counts = load_tensor_state(os.path.join(ckpt_dir, "counts.pth"))
     mean, var = mask_significant_clusters(means, variances, counts, min_cluster_count)
-    global_updates = torch.load(os.path.join(ckpt_dir, "global_updates.pth"))
+    global_updates = load_tensor_state(os.path.join(ckpt_dir, "global_updates.pth"))
     return {"mean": mean, "var": var, "global_updates": global_updates}

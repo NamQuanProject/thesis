@@ -1,4 +1,6 @@
 import numpy as np
+import copy
+import math
 from easydict import EasyDict as edict
 
 
@@ -12,6 +14,8 @@ root.run_label = 'merlin'
 root.gpu_ids = '0'
 root.verbose = False
 root.device = None
+root.cfg_name = ''
+root.run_tag = ''
 
 root.seed = 180
 
@@ -100,6 +104,8 @@ root.dtask.reprob = 0.0
 root.dtask.remode = 'pixel'
 root.dtask.recount = 1
 root.dtask.data_path = './local_datasets/'
+root.dtask.download = False            # dataset acquisition is an explicit preparation step
+root.dtask.split_seed = 0              # fixed ImageNet-R partition, independent of stream seed
 root.dtask.dataset = 'Split-CIFAR100'
 root.dtask.shuffle = False
 root.dtask.output_dir = './output_cifar/'
@@ -161,6 +167,76 @@ root.improve.select_tol = 0.0           # minimum improvement that resets patien
 root.improve.refine_max_iters = 200     # cap on refinement iterations (original: 200)
 root.improve.accumulate = 'merge'       # g += A^T A w_b (released code) | 'joint': g += A^T b_b (paper Eq. 5)
 
+root.runtime = edict()
+root.runtime.jacobian_chunk_size = 1   # exact Jacobian rows; lower peak memory than full vectorization
+root.runtime.save_ridge_stats = False # evaluation needs solved adapters, not large Gram matrices
+root.runtime.max_train_batches = 0    # per task; nonzero means diagnostic, never a benchmark result
+root.runtime.max_eval_batches = 0     # per task
+root.runtime.max_tasks = 0            # prefix of the unchanged stream, for a diagnostic pilot only
+
+_DEFAULTS = copy.deepcopy(root)
+
+
+def reset_config():
+    """Reset the singleton in place (also used by offline integration tests)."""
+    root.clear()
+    root.update(copy.deepcopy(_DEFAULTS))
+
+
+def validate_config():
+    """Fail before model construction for unsupported or inconsistent experiments."""
+    choices = {
+        'routing_key': ('gmm', 'class_gauss'), 'routing_space': ('adapter', 'pretrained'),
+        'routing_unit': ('batch', 'sample'), 'gmm_score': ('mahal_min', 'nll'),
+        'key_view': ('aug', 'clean'), 'cov_type': ('full', 'diag'),
+        'cov_scope': ('shared', 'task'), 'cov_shrink_mode': ('oas', 'fixed'),
+        'class_prior': ('empirical', 'uniform'), 'select_metric': ('acc', 'loss'),
+        'accumulate': ('merge', 'joint'), 'device': ('auto', 'cpu', 'cuda', 'mps'),
+    }
+    for key, allowed in choices.items():
+        if root.improve[key] not in allowed:
+            raise ValueError(f'improve.{key} must be one of {allowed}')
+    for name, value in (
+        ('dtask.nb_classes', root.dtask.nb_classes), ('dtask.batch_size', root.dtask.batch_size),
+        ('dtask.epochs', root.dtask.epochs), ('continual.n_tasks', root.continual.n_tasks),
+        ('signature.n_clusters', root.signature.n_clusters),
+        ('signature.window_t', root.signature.window_t),
+        ('improve.refine_max_iters', root.improve.refine_max_iters),
+    ):
+        if type(value) is not int or value < 1:
+            raise ValueError(f'{name} must be a positive integer')
+    for name, value in [('dtask.num_workers', root.dtask.num_workers),
+                        ('dtask.split_seed', root.dtask.split_seed),
+                        ('signature.cooldown_limit', root.signature.cooldown_limit),
+                        *[(f'runtime.{k}', root.runtime[k]) for k in
+                          ('jacobian_chunk_size', 'max_train_batches', 'max_eval_batches', 'max_tasks')]]:
+        if type(value) is not int or value < 0:
+            raise ValueError(f'{name} must be a nonnegative integer')
+    for name in ('fusion_alpha', 'gmm_var_shrink', 'select_tol', 'cov_shrink'):
+        value = root.improve[name]
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f'improve.{name} must be finite and nonnegative')
+    if root.improve.cov_shrink > 1:
+        raise ValueError('improve.cov_shrink must be in [0, 1]')
+    imp = root.improve
+    if imp.fusion_alpha and (imp.routing_key != 'class_gauss' or imp.routing_space != 'pretrained'):
+        raise ValueError('fusion requires class_gauss keys in pretrained space')
+    if imp.routing_key == 'class_gauss' and imp.routing_space == 'adapter' and imp.cov_scope == 'shared':
+        raise ValueError('adapter-space class_gauss keys require cov_scope=task')
+    if imp.fast_head and (root.dtask.drop or root.dtask.drop_path):
+        raise ValueError('cached head training requires zero drop/drop_path; set improve.fast_head=false')
+    if not imp.inmemory_bank:
+        raise ValueError('only improve.inmemory_bank=true is implemented')
+    if root.dtask.task_inc:
+        raise ValueError('this experiment runner supports global class labels, not task_inc=true')
+    if not root.continual.method.run_merlin:
+        raise ValueError('continual.method.run_merlin must be true to run this implementation')
+    if root.run_label in ('CIFAR-10', 'CIFAR-100', 'IMAGENET-R', 'TINY-IMAGENET', 'VTAB5T'):
+        if root.dtask.nb_classes % root.continual.n_tasks:
+            raise ValueError('nb_classes must be divisible by n_tasks')
+    if root.dtask.input_size != 224:
+        raise ValueError('the registered pretrained ViT and benchmark transforms require input_size=224')
+
 def _merge_a_into_b(a, b):
     """
     Merge config dictionary a into config dictionary b, clobbering the
@@ -200,9 +276,10 @@ def cfg_from_file(filename):
     Load a config file and merge it into the default options.
     """
     import yaml
+    import json
     with open(filename, 'r') as f:
-        # yaml_cfg = edict(yaml.load(f))
-        yaml_cfg = edict(yaml.full_load(f))
+        # YAML 1.1 parses JSON's 1e-06 as a string. Saved JSON must use its own parser.
+        yaml_cfg = edict(json.load(f) if str(filename).endswith('.json') else yaml.safe_load(f))
 
     _merge_a_into_b(yaml_cfg, root)
 
@@ -220,6 +297,8 @@ def cfg_from_list(pairs):
             raise KeyError('{} is not a valid config key'.format(key))
         old = node[parts[-1]]
         if isinstance(old, bool):
+            if value.lower() not in ('1', 'true', 'yes', 'on', '0', 'false', 'no', 'off'):
+                raise ValueError(f'{key}: invalid boolean {value!r}')
             new = value.lower() in ('1', 'true', 'yes', 'on')
         elif isinstance(old, int):
             new = int(value)
