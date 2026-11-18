@@ -2,6 +2,12 @@
 
 Research review: 16 November 2026. Status: proposal, not an implemented learner.
 
+**Narrative update, 18 November 2026:** [the paper story](paper_story.md) explains
+why capacity admission matters without task boundaries and why plug-and-play
+packaging is not itself a contribution. It adds TIDE and other close recent
+work, distinguishes proposed gaps from already addressed questions, and connects
+the mathematical starting point below to a testable paper claim.
+
 This review follows the request to investigate capability acquisition before
 starting another server experiment. The literature considered for this update
 is from 2025 onward, including nearby work on plasticity, compressed gradient

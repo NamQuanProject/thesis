@@ -1,5 +1,8 @@
 # Grow What You Can Retrieve
 
+For the current problem-led narrative and 2025-onward gap assessment, see
+[When does change require new capacity?](paper_story.md), updated 18 November 2026.
+
 **Scope update, 16 November 2026:** the subsequent request prioritizes capability
 acquisition, retention constraints, and bases, with a 2025-onward literature
 filter. See [the acquisition and memory review](acquisition_research_2025plus.md)
